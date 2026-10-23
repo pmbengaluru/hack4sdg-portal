@@ -80,13 +80,14 @@ The camera scanner needs **https**, which GitHub Pages provides.
 4. **Send QR emails.** In **Per team** mode (the default), each team leader gets one email with every member's QR, shown inline and attached as separate images to forward. Any member with their own email is cc'd. **Per person** mode emails only people who have their own address. Click **Send to all not yet mailed**. Progress is saved, so you can stop and resume. Failed sends can be retried.
 5. **Scan.** Volunteers open the site on their phone, pick the checkpoint and scan. A green screen means checked in; a yellow screen means already scanned (it shows when and by whom).
 6. **Table numbers & judge assignments (optional).**
-   - **Teams & QR → Table numbers…** numbers every team in one step. **Edit** on a team changes a single one. Judges see the table number on every team card.
+   - **Table numbers at check-in:** tick **Collect table numbers here** on the Check-in checkpoint. When a volunteer scans *anyone* from a team that has no table number, the scan screen asks for it once. Every later scan of that team shows "Table 12". You can also number teams from **Teams & QR → Table numbers…**, or use **Edit** on a single team.
    - **Settings → Assign mentors to teams**, or the switch on **Assign judges**:
      - **Off:** any mentor can judge any team.
      - **On:** each mentor can only judge the teams assigned to them. The database enforces this.
-   - Assignments are separate for each judging round. On **Assign judges**, pick a round, then either:
-     - **Auto-assign:** choose the mentors and how many judges per team; teams are shared out evenly in table order.
-     - add or remove judges team by team, or **copy** assignments from another round.
+   - Assignments are separate for each judging round. On **Assign judges**, pick the round, then assign by hand:
+     - **By team:** choose a mentor for each team from its dropdown.
+     - **By mentor:** pick a mentor and tick their teams.
+   - **Auto-assign** (collapsed, optional) shares teams out evenly, and you can still change any team by hand afterwards. You can also copy assignments from another round.
    - With assignments on, a team that has no judge in a round can only be scored by an admin.
 7. **Judge.** Mentors scan any team member's QR, enter scores and comments, and save. They can edit their own scores later.
 8. **Results.** The leaderboard shows each team's average across judges and per-criterion averages. You can export scores and attendance as CSV.

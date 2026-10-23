@@ -54,6 +54,8 @@ create table if not exists public.checkpoints (
 );
 alter table public.checkpoints add column if not exists starts_at timestamptz;
 alter table public.checkpoints add column if not exists ends_at   timestamptz;
+-- scan checkpoints only: volunteers are asked for the team's table number when it has none (e.g. at check-in)
+alter table public.checkpoints add column if not exists ask_table boolean not null default false;
 
 create table if not exists public.scans (
   id             bigint generated always as identity primary key,
@@ -230,7 +232,8 @@ begin
   if existing.id is not null then
     return jsonb_build_object('status','duplicate',
       'participant', jsonb_build_object('id',p.id,'name',p.name,'email',p.email),
-      'team', jsonb_build_object('id',t.id,'name',t.name),
+      'team', jsonb_build_object('id',t.id,'name',t.name,'table_no',t.table_no),
+      'ask_table', cp.ask_table and t.table_no is null,
       'scanned_at', existing.scanned_at, 'scanned_by', existing.scanner_name);
   end if;
 
@@ -239,7 +242,8 @@ begin
 
   return jsonb_build_object('status','ok',
     'participant', jsonb_build_object('id',p.id,'name',p.name,'email',p.email),
-    'team', jsonb_build_object('id',t.id,'name',t.name),
+    'team', jsonb_build_object('id',t.id,'name',t.name,'table_no',t.table_no),
+    'ask_table', cp.ask_table and t.table_no is null,
     'team_checked', (select count(*) from public.scans s join public.participants q on q.id = s.participant_id
                      where s.checkpoint_id = cp.id and q.team_id = t.id),
     'team_size', (select count(*) from public.participants where team_id = t.id));
@@ -306,6 +310,35 @@ begin
                             'members_created', mem_new, 'members_updated', mem_upd);
 end $$;
 
+-- ---------------------------------------------------------------
+-- RPC: volunteers/admins set a team's table number (e.g. while checking the team in)
+-- returns {status:'ok'} or {status:'taken', team:<other team>} unless p_force
+-- ---------------------------------------------------------------
+create or replace function public.set_table_no(p_team bigint, p_table text, p_force boolean default false)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  v text := nullif(trim(coalesce(p_table, '')), '');
+  other text;
+begin
+  if not public.has_role('admin','volunteer') then
+    return jsonb_build_object('status','forbidden','message','Only volunteers and admins can set table numbers.');
+  end if;
+  if length(v) > 20 then
+    return jsonb_build_object('status','error','message','Table number is too long.');
+  end if;
+  if v is not null and not p_force then
+    select name into other from public.teams where lower(table_no) = lower(v) and id <> p_team limit 1;
+    if other is not null then
+      return jsonb_build_object('status','taken','team',other);
+    end if;
+  end if;
+  update public.teams set table_no = v where id = p_team;
+  if not found then return jsonb_build_object('status','error','message','Team not found.'); end if;
+  return jsonb_build_object('status','ok','table_no',v);
+end $$;
+
+revoke execute on function public.set_table_no(bigint, text, boolean) from anon, public;
+grant  execute on function public.set_table_no(bigint, text, boolean) to authenticated;
 revoke execute on function public.scan_participant(bigint, text) from anon, public;
 revoke execute on function public.import_teams(jsonb, boolean)   from anon, public;
 grant  execute on function public.scan_participant(bigint, text) to authenticated;
