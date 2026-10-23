@@ -17,9 +17,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function toast(msg, kind = "") {
   const el = document.createElement("div");
   el.className = `toast ${kind}`;
-  el.textContent = msg;
+  el.innerHTML = `${icon(kind === "bad" ? "alert" : "check")}<span></span>`;
+  el.lastChild.textContent = msg;
   $("#toasts").appendChild(el);
-  setTimeout(() => el.remove(), kind === "bad" ? 6000 : 3000);
+  setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 300); }, kind === "bad" ? 6000 : 3000);
 }
 
 function must({ data, error }) {
@@ -55,32 +56,43 @@ function download(filename, text, type = "text/csv") {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-// QR helpers (qrcode-generator global)
+// QR helpers (qrcode-generator global). Level "H" so the centre logo doesn't affect scanning.
+const QR_BADGE = Object.assign(new Image(), { src: "assets/qr-badge.png" });
+const QR_INK = "#141b3a";
 function qrMatrix(text) {
-  const q = window.qrcode(0, "M");
+  const q = window.qrcode(0, "H");
   q.addData(text);
   q.make();
   return q;
 }
+// badge size in modules: ~29% of the code width, as tested for the email version
+const badgeModules = (n) => Math.round(n * 0.29);
 function qrSvg(text) {
   const q = qrMatrix(text);
-  const n = q.getModuleCount(), m = 2, size = n + m * 2;
+  const n = q.getModuleCount(), m = 2, size = n + m * 2, b = badgeModules(n), o = (size - b) / 2;
   let path = "";
   for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (q.isDark(r, c)) path += `M${c + m},${r + m}h1v1h-1z`;
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#fff"/><path d="${path}" fill="#000"/></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#fff"/>
+    <path d="${path}" fill="${QR_INK}"/><image href="assets/qr-badge.png" x="${o}" y="${o}" width="${b}" height="${b}"/></svg>`;
 }
-function qrPng(text, label, sub) {
+async function qrPng(text, label, sub) {
+  if (!QR_BADGE.complete) await new Promise((r) => { QR_BADGE.onload = QR_BADGE.onerror = r; });
   const q = qrMatrix(text);
-  const n = q.getModuleCount(), cell = 12, m = 4, w = (n + m * 2) * cell, extra = label ? 90 : 0;
+  const n = q.getModuleCount(), cell = 14, m = 4, w = (n + m * 2) * cell, extra = label ? 96 : 0;
   const cv = Object.assign(document.createElement("canvas"), { width: w, height: w + extra });
   const ctx = cv.getContext("2d");
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
-  ctx.fillStyle = "#000";
+  ctx.fillStyle = QR_INK;
   for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (q.isDark(r, c)) ctx.fillRect((c + m) * cell, (r + m) * cell, cell, cell);
+  if (QR_BADGE.naturalWidth) {
+    const b = badgeModules(n) * cell;
+    ctx.drawImage(QR_BADGE, (w - b) / 2, (w - b) / 2, b, b);
+  }
   if (label) {
     ctx.textAlign = "center";
-    ctx.font = "bold 28px Inter, Arial"; ctx.fillText(label, w / 2, w + 30);
-    ctx.font = "22px Inter, Arial"; ctx.fillStyle = "#444"; ctx.fillText(sub || "", w / 2, w + 62);
+    ctx.fillStyle = QR_INK;
+    ctx.font = "700 30px 'Plus Jakarta Sans', Arial"; ctx.fillText(label, w / 2, w + 32);
+    ctx.font = "500 22px 'Plus Jakarta Sans', Arial"; ctx.fillStyle = "#475569"; ctx.fillText(sub || "", w / 2, w + 66);
   }
   return cv.toDataURL("image/png");
 }
@@ -173,21 +185,65 @@ const getParticipants = async () =>
   must(await sb.from("participants").select("id,name,email,phone,token,email_status,email_error,team_id,teams(name)").order("name"));
 
 // ------------------------------------------------------------------ routing
+// line icons (24px grid, stroke = currentColor)
+const ICON_PATHS = {
+  dashboard: '<rect x="3" y="3" width="7" height="9" rx="2"/><rect x="14" y="3" width="7" height="5" rx="2"/><rect x="14" y="12" width="7" height="9" rx="2"/><rect x="3" y="16" width="7" height="5" rx="2"/>',
+  teams: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
+  import: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
+  checkpoints: '<path d="M4 22V4a1 1 0 0 1 .4-.8A6 6 0 0 1 8 2c3 0 5 2 7.33 2q2 0 3.67-.8a.5.5 0 0 1 .67.47v10.3a1 1 0 0 1-.4.8A6 6 0 0 1 16 16c-3 0-5-2-8-2a6 6 0 0 0-4 1.53"/>',
+  staff: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+  emails: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+  scan: '<path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><rect x="7" y="7" width="4" height="4" rx="1"/><path d="M17 7v4M7 17h4M14 14h3v3"/>',
+  judge: '<path d="M11.52 2.3a.53.53 0 0 1 .96 0l2.31 4.68a2.12 2.12 0 0 0 1.6 1.16l5.16.76a.53.53 0 0 1 .3.9l-3.74 3.64a2.12 2.12 0 0 0-.61 1.88l.88 5.14a.53.53 0 0 1-.77.56l-4.62-2.43a2.12 2.12 0 0 0-1.97 0L6.4 21.01a.53.53 0 0 1-.77-.56l.88-5.13a2.12 2.12 0 0 0-.61-1.88L2.16 9.8a.53.53 0 0 1 .3-.9l5.16-.76a2.12 2.12 0 0 0 1.6-1.16z"/>',
+  results: '<path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6M18 9h1.5a2.5 2.5 0 0 0 0-5H18M4 22h16M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0z"/>',
+  settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+  account: '<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+  x: '<path d="M18 6 6 18M6 6l12 12"/>',
+  alert: '<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>',
+};
+const icon = (name, cls = "") => `<svg class="ico ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name] || ""}</svg>`;
+const SDG = ["#E5243B", "#DDA63A", "#4C9F38", "#C5192D", "#FF3A21", "#26BDE2", "#FCC30B", "#A21942", "#FD6925", "#DD1367", "#FD9D24", "#BF8B2E", "#3F7E44", "#0A97D9", "#56C02B", "#00689D", "#19486A"];
+const sdgStrip = (cls = "") => `<div class="sdg-strip ${cls}">${SDG.map((c, i) => `<i style="background:${c};--i:${i}"></i>`).join("")}</div>`;
+
+const reduceMotion = () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+// stagger cards in and count numbers up, after each page render
+function animatePage(root) {
+  [...root.querySelectorAll(".page-head, .card, .stat, .team, .notice")].slice(0, 40)
+    .forEach((el, i) => el.style.setProperty("--d", `${Math.min(i, 14) * 35}ms`));
+  if (reduceMotion()) return;
+  root.querySelectorAll(".stat .v").forEach((el) => {
+    const m = el.textContent.trim().match(/^(\d+)(.*)$/);
+    if (!m || Number(m[1]) < 2) return;
+    const to = Number(m[1]), rest = m[2], t0 = performance.now(), dur = 700;
+    const step = (t) => {
+      const k = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+      el.textContent = `${Math.round(to * e)}${rest}`;
+      if (k < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
+}
+
 const ROUTES = {
-  dashboard: { label: "Dashboard", icon: "▦", roles: ["admin"], view: viewDashboard },
-  teams: { label: "Teams & QR", icon: "👥", roles: ["admin"], view: viewTeams },
-  import: { label: "Import CSV", icon: "⇪", roles: ["admin"], view: viewImport },
-  checkpoints: { label: "Checkpoints", icon: "⚑", roles: ["admin"], view: viewCheckpoints },
-  staff: { label: "Staff", icon: "🛡", roles: ["admin"], view: viewStaff },
-  emails: { label: "Send QR emails", icon: "✉", roles: ["admin"], view: viewEmails },
-  scan: { label: "Scan", icon: "⌖", roles: ["admin", "volunteer"], view: viewScan },
-  judge: { label: "Judge", icon: "★", roles: ["admin", "mentor"], view: viewJudge },
-  results: { label: "Results", icon: "🏆", roles: ["admin"], view: viewResults },
-  settings: { label: "Settings", icon: "⚙", roles: ["admin"], view: viewSettings },
-  account: { label: "My account", icon: "☺", roles: ["admin", "volunteer", "mentor"], view: viewAccount },
+  dashboard: { label: "Dashboard", icon: "dashboard", roles: ["admin"], view: viewDashboard },
+  teams: { label: "Teams & QR", icon: "teams", roles: ["admin"], view: viewTeams },
+  import: { label: "Import", icon: "import", roles: ["admin"], view: viewImport },
+  checkpoints: { label: "Checkpoints", icon: "checkpoints", roles: ["admin"], view: viewCheckpoints },
+  staff: { label: "Staff", icon: "staff", roles: ["admin"], view: viewStaff },
+  emails: { label: "QR emails", icon: "emails", roles: ["admin"], view: viewEmails },
+  scan: { label: "Scan", icon: "scan", roles: ["admin", "volunteer"], view: viewScan },
+  judge: { label: "Judge", icon: "judge", roles: ["admin", "mentor"], view: viewJudge },
+  results: { label: "Results", icon: "results", roles: ["admin"], view: viewResults },
+  settings: { label: "Settings", icon: "settings", roles: ["admin"], view: viewSettings },
+  account: { label: "Account", icon: "account", roles: ["admin", "volunteer", "mentor"], view: viewAccount },
   print: { label: "Print badges", roles: ["admin"], view: viewPrint, hidden: true },
 };
 const homeFor = (role) => ({ admin: "dashboard", volunteer: "scan", mentor: "judge" }[role]);
+
+const SKELETON = `<div class="skeleton"><div class="sk sk-title"></div><div class="sk sk-line"></div>
+  <div class="grid stats">${'<div class="sk sk-card"></div>'.repeat(4)}</div><div class="sk sk-block"></div></div>`;
 
 async function route() {
   if (!state.me) return;
@@ -199,31 +255,42 @@ async function route() {
     return;
   }
   $$(".nav a, .mnav a").forEach((a) => a.classList.toggle("active", a.dataset.r === name));
+  $(".mnav a.active")?.scrollIntoView({ inline: "center", block: "nearest", behavior: reduceMotion() ? "auto" : "smooth" });
   const main = $("#main");
-  main.innerHTML = `<div class="muted">Loading…</div>`;
+  main.classList.remove("page-in");
+  main.innerHTML = SKELETON;
   try {
     await r.view(main, ...args);
   } catch (e) {
     console.error(e);
     main.innerHTML = `<div class="card"><h2>Something went wrong</h2><p class="muted">${esc(e.message)}</p></div>`;
   }
+  void main.offsetWidth; // restart the enter animation
+  main.classList.add("page-in");
+  animatePage(main);
 }
 window.addEventListener("hashchange", route);
 
 function renderShell() {
   const links = Object.entries(ROUTES).filter(([, r]) => !r.hidden && r.roles.includes(state.me.role));
-  const nav = links.map(([k, r]) => `<a href="#/${k}" data-r="${k}"><span>${r.icon}</span>${r.label}</a>`).join("");
-  const ev = esc(state.settings.event_name || "Event");
+  const nav = links.map(([k, r]) => `<a href="#/${k}" data-r="${k}">${icon(r.icon)}<span>${r.label}</span></a>`).join("");
+  const initials = state.me.name.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
   app.innerHTML = `
-    <div class="topbar"><div class="brand"><div class="logo">QR</div>${ev}</div>
-      <button class="btn sm" id="logout2">Sign out</button></div>
-    <nav class="mnav">${links.map(([k, r]) => `<a href="#/${k}" data-r="${k}">${r.label}</a>`).join("")}</nav>
+    <div class="bg-orbs" aria-hidden="true"><i></i><i></i><i></i></div>
+    <header class="topbar"><img src="assets/logo.png" alt="${esc(state.settings.event_name)}" class="topbar-logo">
+      <span class="badge brand">${state.me.role}</span>
+      <button class="icon-btn" id="logout2" title="Sign out">${icon("logout")}</button></header>
+    <nav class="mnav">${nav}</nav>
     <div class="shell">
       <aside class="side">
-        <div class="brand"><div class="logo">QR</div>${ev}</div>
+        <a class="side-logo" href="#/${homeFor(state.me.role)}"><img src="assets/logo.png" alt="${esc(state.settings.event_name)}"></a>
+        ${sdgStrip()}
         <nav class="nav">${nav}</nav>
-        <div class="me"><b>${esc(state.me.name)}</b><br><span class="badge brand">${state.me.role}</span>
-          <div style="margin-top:10px"><button class="btn sm" id="logout">Sign out</button></div></div>
+        <div class="me">
+          <div class="avatar">${esc(initials)}</div>
+          <div class="me-info"><b>${esc(state.me.name)}</b><span>${state.me.role}</span></div>
+          <button class="icon-btn" id="logout" title="Sign out">${icon("logout")}</button>
+        </div>
       </aside>
       <main class="main" id="main"></main>
     </div>`;
@@ -235,15 +302,24 @@ function renderShell() {
 // ------------------------------------------------------------------ auth
 function viewLogin(message = "") {
   app.innerHTML = `
-    <div class="login"><form class="card" id="login-form">
-      <div class="brand"><div class="logo">QR</div>Event Portal</div>
-      <h1>Sign in</h1>
-      <p class="muted small">For admins, volunteers and mentors. Ask an admin if you don't have a login.</p>
-      ${message ? `<div class="notice">${message}</div>` : ""}
-      <div class="field"><label>Email</label><input type="email" name="email" required autocomplete="username"></div>
-      <div class="field"><label>Password</label><input type="password" name="password" required autocomplete="current-password"></div>
-      <button class="btn primary lg" style="width:100%">Sign in</button>
-    </form></div>`;
+    <div class="bg-orbs" aria-hidden="true"><i></i><i></i><i></i></div>
+    <div class="login">
+      <section class="login-hero">
+        <div class="logo-stage"><div class="ring" aria-hidden="true"></div>
+          <img src="assets/logo-transparent.png" alt="HACK4SDG – Ideas today, impact tomorrow" class="login-logo"></div>
+        <h2 class="hero-line">One portal for <span class="c1">QR passes</span>, <span class="c2">check-ins</span> &amp; <span class="c3">judging</span></h2>
+        ${sdgStrip("big")}
+      </section>
+      <form class="card login-card" id="login-form">
+        <h1>Welcome back</h1>
+        <p class="muted small">Sign in as an admin, volunteer or mentor. Ask an admin if you don't have a login yet.</p>
+        ${message ? `<div class="notice">${message}</div>` : ""}
+        <div class="field float"><input type="email" name="email" required autocomplete="username" placeholder=" " id="li-e"><label for="li-e">Email</label></div>
+        <div class="field float"><input type="password" name="password" required autocomplete="current-password" placeholder=" " id="li-p"><label for="li-p">Password</label></div>
+        <button class="btn primary lg block">Sign in</button>
+      </form>
+    </div>`;
+
   $("#login-form").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -423,8 +499,8 @@ function showQr(p, team) {
       ${p.email && p.email !== leader?.email ? `<button class="btn" id="qr-mail">Email only ${esc(p.name.split(" ")[0])}</button>` : ""}
       ${leader ? `<button class="btn primary" id="qr-team" title="One email to ${esc(leader.email)} with all ${team.participants.length} QR codes">Email team's QRs to leader</button>` : ""}
     </div>`, (m, close) => {
-    $("#qr-dl", m).onclick = () => {
-      const a = Object.assign(document.createElement("a"), { href: qrPng(p.token, p.name, team.name), download: `${p.name.replace(/\W+/g, "_")}_QR.png` });
+    $("#qr-dl", m).onclick = async () => {
+      const a = Object.assign(document.createElement("a"), { href: await qrPng(p.token, p.name, team.name), download: `${p.name.replace(/\W+/g, "_")}_QR.png` });
       a.click();
     };
     const send = async (btn, body, done) => {
@@ -945,7 +1021,7 @@ async function viewScan(main, cpId) {
         <div class="row" style="margin-top:10px"><button class="btn" id="cam">Start camera</button><span class="small muted" id="cam-st"></span></div>
       </div>
       <div>
-        <div class="result" id="res"><div><div class="big" style="color:var(--muted)">Ready</div><div class="sub muted">Point the camera at a participant's QR</div></div></div>
+        <div class="result idle" id="res"><div><div class="result-ico">${icon("scan")}</div><div class="big">Ready to scan</div><div class="sub muted">Point the camera at a participant's QR</div></div></div>
         <div class="card" style="margin-top:12px">
           <div class="row" style="justify-content:space-between"><span><b>${esc(cp.name)}</b> ${cpTimeBadge(cp)}</span><span><b id="done">${done}</b> / ${total} scanned</span></div>
           <div class="progress" style="margin-top:6px"><div id="bar" style="width:${total ? (done / total) * 100 : 0}%"></div></div>
@@ -965,8 +1041,12 @@ async function viewScan(main, cpId) {
   recent();
 
   const show = (kind, title, sub) => {
-    $("#res").className = `result ${kind}`;
-    $("#res").innerHTML = `<div><div class="big">${title}</div><div class="sub">${sub || ""}</div></div>`;
+    const ic = { ok: "check", dup: "alert", bad: "x" }[kind];
+    const el = $("#res");
+    el.className = `result ${kind}`;
+    el.innerHTML = `<div>${ic ? `<div class="result-ico">${icon(ic)}</div>` : kind === "" ? '<div class="spinner"></div>' : ""}
+      <div class="big">${title}</div><div class="sub">${sub || ""}</div></div>`;
+    if (kind) { el.classList.remove("pop"); void el.offsetWidth; el.classList.add("pop"); }
   };
   const handle = async (code) => {
     show("", "Checking…", "");
@@ -977,14 +1057,14 @@ async function viewScan(main, cpId) {
         done++;
         $("#done").textContent = done;
         $("#bar").style.width = `${(done / total) * 100}%`;
-        show("ok", `✓ ${esc(r.participant.name)}`, `Team <b>${esc(r.team.name)}</b> · ${r.team_checked}/${r.team_size} of team scanned here`);
+        show("ok", esc(r.participant.name), `Team <b>${esc(r.team.name)}</b> · ${r.team_checked}/${r.team_size} of team scanned here`);
         recent();
       } else if (r.status === "duplicate") {
         beep(false);
         show("dup", `Already scanned – ${esc(r.participant.name)}`, `Team ${esc(r.team.name)} · ${fmtTime(r.scanned_at)}${r.scanned_by ? " by " + esc(r.scanned_by) : ""}`);
       } else {
         beep(false);
-        show("bad", "✕ " + esc(r.message), "");
+        show("bad", esc(r.message), "");
       }
     } catch (e) { beep(false); show("bad", "Error", esc(e.message)); }
   };

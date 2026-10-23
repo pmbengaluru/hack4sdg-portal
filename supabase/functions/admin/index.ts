@@ -4,6 +4,9 @@
 import { createClient } from "npm:@supabase/supabase-js@2.45.4";
 import nodemailer from "npm:nodemailer@6.9.16";
 import QRCode from "npm:qrcode@1.5.4";
+import { PNG } from "npm:pngjs@7.0.0";
+import { Buffer } from "node:buffer";
+import { BADGE_PNG_B64, LOGO_JPG_B64 } from "./logo.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -45,10 +48,56 @@ async function getSettings() {
   return Object.fromEntries((data ?? []).map((r) => [r.key, r.value ?? ""]));
 }
 
+// Inline logo used in every email header (<img src="cid:logo">)
+const LOGO_ATTACHMENT = { filename: "hack4sdg.jpg", content: Buffer.from(LOGO_JPG_B64, "base64"), cid: "logo" };
+const SDG_STRIP = ["#E5243B", "#DDA63A", "#4C9F38", "#C5192D", "#FF3A21", "#26BDE2", "#FCC30B", "#A21942", "#FD6925",
+  "#DD1367", "#FD9D24", "#BF8B2E", "#3F7E44", "#0A97D9", "#56C02B", "#00689D", "#19486A"]
+  .map((c) => `<td style="background:${c};height:6px;font-size:0;line-height:0">&nbsp;</td>`).join("");
+
 function shell(event: string, inner: string) {
-  return `<div style="font-family:Segoe UI,Arial,sans-serif;max-width:560px;margin:auto;color:#1f2937">
-    <div style="background:#0f766e;color:#fff;padding:18px 24px;border-radius:12px 12px 0 0;font-size:20px;font-weight:700">${esc(event)}</div>
-    <div style="border:1px solid #e5e7eb;border-top:0;padding:24px;border-radius:0 0 12px 12px">${inner}</div></div>`;
+  return `<div style="background:#f3f5f9;padding:24px 12px;font-family:'Segoe UI',Arial,sans-serif;color:#1f2937">
+    <div style="max-width:580px;margin:auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 2px 12px rgba(20,27,58,.08)">
+      <table role="presentation" style="width:100%;border-collapse:collapse"><tr>${SDG_STRIP}</tr></table>
+      <div style="text-align:center;padding:22px 24px 6px"><img src="cid:logo" alt="${esc(event)}" width="200" style="max-width:200px;height:auto"></div>
+      <div style="padding:8px 28px 28px">${inner}</div>
+      <div style="background:#141b3a;color:#cbd5e1;text-align:center;font-size:12px;padding:12px">${esc(event)} · Ideas today, impact tomorrow</div>
+    </div></div>`;
+}
+
+// QR PNG with the HACK4SDG badge in the centre. Error correction "H" recovers 30% of the code;
+// the badge covers far less than that.
+const BADGE = PNG.sync.read(Buffer.from(BADGE_PNG_B64, "base64"));
+function qrPng(text: string): Buffer {
+  const qr = QRCode.create(text, { errorCorrectionLevel: "H" });
+  const n = qr.modules.size, mods = qr.modules.data, margin = 4;
+  const scale = Math.max(6, Math.floor(440 / (n + margin * 2)));
+  const W = (n + margin * 2) * scale;
+  const png = new PNG({ width: W, height: W });
+  png.data.fill(255);
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      if (!mods[r * n + c]) continue;
+      for (let y = 0; y < scale; y++) {
+        const row = ((r + margin) * scale + y) * W;
+        for (let x = 0; x < scale; x++) {
+          const i = (row + (c + margin) * scale + x) * 4;
+          png.data[i] = 20; png.data[i + 1] = 27; png.data[i + 2] = 58; // brand navy
+        }
+      }
+    }
+  }
+  if (BADGE.width <= n * scale * 0.3) {
+    const off = Math.floor((W - BADGE.width) / 2);
+    for (let y = 0; y < BADGE.height; y++) {
+      for (let x = 0; x < BADGE.width; x++) {
+        const s = (y * BADGE.width + x) * 4, a = BADGE.data[s + 3] / 255;
+        if (!a) continue;
+        const d = ((off + y) * W + off + x) * 4;
+        for (let k = 0; k < 3; k++) png.data[d + k] = Math.round(BADGE.data[s + k] * a + png.data[d + k] * (1 - a));
+      }
+    }
+  }
+  return PNG.sync.write(png);
 }
 
 async function sendQr(ids: number[]) {
@@ -69,7 +118,7 @@ async function sendQr(ids: number[]) {
     try {
       const team = (p as any).teams?.name ?? "";
       const vars = { name: p.name, team, event, code: p.token };
-      const png = await QRCode.toBuffer(p.token, { width: 420, margin: 2, errorCorrectionLevel: "M" });
+      const png = qrPng(p.token);
       const message = esc(fill(s.email_message || "", vars)).replace(/\n/g, "<br>");
       const html = shell(event, `
         <p style="font-size:15px;line-height:1.55">${message}</p>
@@ -85,6 +134,7 @@ async function sendQr(ids: number[]) {
         html,
         text: `${fill(s.email_message || "", vars)}\n\nPass code: ${p.token}\nTeam: ${team}`,
         attachments: [
+          LOGO_ATTACHMENT,
           { filename: "qr.png", content: png, cid: "qr" },
           { filename: `${p.name.replace(/[^\w]+/g, "_")}_QR.png`, content: png },
         ],
@@ -126,10 +176,10 @@ async function sendTeams(teamIds: number[]) {
     try {
       const cc = [...new Set(members.map((m) => m.email).filter((e) => e && e !== lead.email))];
       const vars = { name: lead.name, team: t.name, event, code: lead.token };
-      const attachments: { filename: string; content: Uint8Array; cid?: string }[] = [];
+      const attachments: { filename: string; content: Uint8Array; cid?: string }[] = [LOGO_ATTACHMENT];
       const blocks: string[] = [];
       for (const [i, m] of members.entries()) {
-        const png = await QRCode.toBuffer(m.token, { width: 420, margin: 2, errorCorrectionLevel: "M" });
+        const png = qrPng(m.token);
         attachments.push({ filename: `qr${i}.png`, content: png, cid: `qr${i}` });
         attachments.push({ filename: `${m.name.replace(/[^\w]+/g, "_")}_QR.png`, content: png });
         blocks.push(`<td style="text-align:center;padding:10px;vertical-align:top;width:50%">
@@ -183,7 +233,7 @@ async function findAuthUser(email: string) {
 async function mailCredentials(name: string, email: string, role: string, password: string) {
   const s = await getSettings();
   const event = s.event_name || "Hackathon";
-  const link = APP_URL ? `<p><a href="${esc(APP_URL)}" style="background:#0f766e;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none">Open the event portal</a></p>` : "";
+  const link = APP_URL ? `<p><a href="${esc(APP_URL)}" style="background:#1f78c1;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none">Open the event portal</a></p>` : "";
   await transporter.sendMail({
     from: FROM,
     to: email,
@@ -193,6 +243,7 @@ async function mailCredentials(name: string, email: string, role: string, passwo
       <p>Email: <b>${esc(email)}</b><br>Password: <b style="font-family:monospace;font-size:15px">${esc(password)}</b></p>
       ${link}<p style="color:#6b7280;font-size:13px">You can change your password after signing in.</p>`),
     text: `You've been added as a ${role} for ${event}.\nEmail: ${email}\nPassword: ${password}\n${APP_URL}`,
+    attachments: [LOGO_ATTACHMENT],
   });
 }
 
@@ -224,7 +275,10 @@ Deno.serve(async (req) => {
           from: FROM,
           to: body.to || email,
           subject: `${s.event_name || "Event"} – test email`,
-          html: shell(s.event_name || "Event", "<p>Email sending is working ✅</p>"),
+          html: shell(s.event_name || "Event", `<p style="text-align:center">Email sending is working ✅</p>
+            <div style="text-align:center"><img src="cid:qr" width="200" height="200" alt="Sample QR">
+            <div style="font-size:12px;color:#6b7280">Sample QR – this is how passes will look</div></div>`),
+          attachments: [LOGO_ATTACHMENT, { filename: "sample.png", content: qrPng("SAMPLE12CODE"), cid: "qr" }],
         });
         return json({ ok: true });
       }
