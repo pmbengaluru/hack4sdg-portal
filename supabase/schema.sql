@@ -20,6 +20,7 @@ create table if not exists public.teams (
   created_at    timestamptz not null default now()
 );
 alter table public.teams add column if not exists college text;
+alter table public.teams add column if not exists table_no text;  -- table / team number shown to judges
 create unique index if not exists teams_name_key on public.teams (lower(name));
 
 create table if not exists public.participants (
@@ -79,12 +80,24 @@ create table if not exists public.scores (
 );
 create index if not exists scores_team_idx on public.scores (team_id);
 
+-- which mentor judges which team, per judging round (only enforced when settings.assign_mentors = 'on')
+create table if not exists public.judge_assignments (
+  id            bigint generated always as identity primary key,
+  checkpoint_id bigint not null references public.checkpoints(id) on delete cascade,
+  team_id       bigint not null references public.teams(id) on delete cascade,
+  judge_email   text not null references public.staff(email) on delete cascade on update cascade,
+  created_at    timestamptz not null default now(),
+  unique (checkpoint_id, team_id, judge_email)
+);
+create index if not exists judge_assignments_judge_idx on public.judge_assignments (judge_email, checkpoint_id);
+
 create table if not exists public.settings (
   key   text primary key,
   value text
 );
 insert into public.settings (key, value) values
   ('event_name', 'HACK4SDG'),
+  ('assign_mentors', 'off'),
   ('email_subject', 'Your {{event}} entry pass – {{name}}'),
   ('email_message', 'Hi {{name}},
 
@@ -109,6 +122,24 @@ language sql stable security definer set search_path = public as $$
   select coalesce(public.my_role() = any(roles), false)
 $$;
 
+create or replace function public.my_email() returns text
+language sql stable security definer set search_path = public as $$
+  select lower(email) from auth.users where id = auth.uid()
+$$;
+
+-- Can the signed-in user score this team in this round?
+-- Admins always; mentors always when assignments are off, otherwise only their assigned teams.
+create or replace function public.can_judge(p_checkpoint bigint, p_team bigint) returns boolean
+language sql stable security definer set search_path = public as $$
+  select case
+    when public.has_role('admin') then true
+    when not public.has_role('mentor') then false
+    when coalesce((select value from public.settings where key = 'assign_mentors'), 'off') <> 'on' then true
+    else exists (select 1 from public.judge_assignments a
+                 where a.checkpoint_id = p_checkpoint and a.team_id = p_team and a.judge_email = public.my_email())
+  end
+$$;
+
 -- ---------------------------------------------------------------
 -- Row level security
 -- ---------------------------------------------------------------
@@ -119,12 +150,13 @@ alter table public.checkpoints  enable row level security;
 alter table public.scans        enable row level security;
 alter table public.scores       enable row level security;
 alter table public.settings     enable row level security;
+alter table public.judge_assignments enable row level security;
 
 do $$
 declare t text;
 begin
   -- drop old policies so the file can be re-run
-  for t in select unnest(array['staff','teams','participants','checkpoints','scans','scores','settings']) loop
+  for t in select unnest(array['staff','teams','participants','checkpoints','scans','scores','settings','judge_assignments']) loop
     execute (select coalesce(string_agg(format('drop policy if exists %I on public.%I;', policyname, t), ' '), '')
              from pg_policies where schemaname = 'public' and tablename = t);
   end loop;
@@ -152,12 +184,16 @@ create policy scans_delete on public.scans for delete to authenticated using (pu
 create policy scores_read  on public.scores for select to authenticated
   using (public.has_role('admin') or (public.has_role('mentor') and judge_id = auth.uid()));
 create policy scores_insert on public.scores for insert to authenticated
-  with check (public.has_role('admin','mentor') and judge_id = auth.uid()
+  with check (judge_id = auth.uid() and public.can_judge(checkpoint_id, team_id)
               and exists (select 1 from public.checkpoints c where c.id = checkpoint_id and c.type = 'judging' and c.active));
 create policy scores_update on public.scores for update to authenticated
-  using (judge_id = auth.uid() and public.has_role('admin','mentor'))
-  with check (judge_id = auth.uid()
+  using (judge_id = auth.uid() and public.can_judge(checkpoint_id, team_id))
+  with check (judge_id = auth.uid() and public.can_judge(checkpoint_id, team_id)
               and exists (select 1 from public.checkpoints c where c.id = checkpoint_id and c.type = 'judging' and c.active));
+
+-- judge assignments: staff can see them (mentors need their list), admins manage
+create policy assign_read  on public.judge_assignments for select to authenticated using (public.has_role('admin','volunteer','mentor'));
+create policy assign_admin on public.judge_assignments for all    to authenticated using (public.has_role('admin')) with check (public.has_role('admin'));
 create policy scores_delete on public.scores for delete to authenticated using (public.has_role('admin'));
 
 -- ---------------------------------------------------------------
@@ -275,6 +311,9 @@ revoke execute on function public.import_teams(jsonb, boolean)   from anon, publ
 grant  execute on function public.scan_participant(bigint, text) to authenticated;
 grant  execute on function public.import_teams(jsonb, boolean)   to authenticated;
 revoke execute on function public.my_role()          from anon, public;
+revoke execute on function public.my_email()         from anon, public;
+revoke execute on function public.can_judge(bigint, bigint) from anon, public;
+grant  execute on function public.can_judge(bigint, bigint) to authenticated;
 revoke execute on function public.has_role(text[])   from anon, public;
 grant  execute on function public.my_role() to authenticated;
 grant  execute on function public.has_role(text[]) to authenticated;

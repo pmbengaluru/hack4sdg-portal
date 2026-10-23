@@ -245,7 +245,7 @@ tr:last-child td { border-bottom: 0; }
 
 /* ---------- scanner */
 .scan-layout { display: grid; grid-template-columns: minmax(0, 480px) minmax(0, 1fr); gap: 18px; align-items: start; }
-@media (max-width: 960px) { .scan-layout { grid-template-columns: 1fr; } }
+@media (max-width: 960px) { .scan-layout { grid-template-columns: 1fr; } .scan-layout.list-first > :last-child { order: -1; } }
 #reader { position: relative; width: 100%; border-radius: var(--radius); overflow: hidden; background: #070b18; min-height: 280px; box-shadow: var(--shadow-lg); }
 #reader::after { content: ""; position: absolute; left: 12%; right: 12%; top: 20%; height: 2px; background: linear-gradient(90deg, transparent, #26bde2, #56c02b, transparent); box-shadow: 0 0 18px #26bde2; animation: scanline 2.2s ease-in-out infinite; pointer-events: none; }
 @keyframes scanline { 50% { top: 78%; } }
@@ -283,6 +283,39 @@ tr:last-child td { border-bottom: 0; }
 .team-pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px; }
 .team-pick button { text-align: left; }
 #tot { display: inline-block; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; font-size: 1.6rem; }
+
+/* ---------- judging: team cards, assignment switch, chips */
+.judge-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+.judge-card { display: flex; align-items: center; gap: 12px; text-align: left; font: inherit; color: inherit; cursor: pointer;
+  background: var(--panel-solid); border: 1.5px solid var(--line); border-radius: 16px; padding: 10px 12px;
+  transition: transform .25s var(--ease), box-shadow .25s, border-color .2s; }
+.judge-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); border-color: rgba(31, 120, 193, .4); }
+.judge-card .tno { flex: none; width: 58px; height: 58px; border-radius: 14px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: var(--grad); color: #fff; font-weight: 800; font-size: 1.3rem; line-height: 1; letter-spacing: -.02em; }
+.judge-card .tno small { font-size: .58rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; opacity: .85; margin-bottom: 3px; }
+.judge-card.is-done .tno { background: linear-gradient(120deg, var(--ok), #56c02b); }
+.judge-card .jt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.judge-card .jt b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.h-tno { display: inline-block; vertical-align: middle; font-size: .9rem; padding: 4px 10px; border-radius: 10px; background: var(--grad); color: #fff; -webkit-text-fill-color: #fff; letter-spacing: 0; }
+
+.assign-mode { display: flex; align-items: center; gap: 14px; border-left: 4px solid rgba(100, 112, 138, .4); }
+.assign-mode.on { border-left-color: var(--ok); }
+.switch { position: relative; display: inline-block; width: 50px; height: 28px; flex: none; margin: 0; cursor: pointer; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch .slider { position: absolute; inset: 0; border-radius: 999px; background: rgba(100, 112, 138, .35); transition: background .25s; }
+.switch .slider::before { content: ""; position: absolute; width: 22px; height: 22px; left: 3px; top: 3px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, .25); transition: transform .3s var(--ease); }
+.switch input:checked + .slider { background: var(--ok); }
+.switch input:checked + .slider::before { transform: translateX(22px); }
+.switch input:focus-visible + .slider { box-shadow: 0 0 0 4px var(--brand-soft); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1.5px solid var(--line); background: var(--panel-solid); font-size: .82rem; font-weight: 600; margin: 0; cursor: pointer; transition: all .2s; }
+.chip input { width: 14px; height: 14px; }
+.chip:has(input:checked) { border-color: var(--blue); background: var(--brand-soft); }
+.chip.static { cursor: default; }
+.chip b { background: var(--brand-soft); color: var(--brand); border-radius: 999px; padding: 0 7px; font-size: .75rem; }
+.chip button { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 1rem; line-height: 1; padding: 0 0 0 2px; }
+.chip button:hover { color: var(--bad); }
 
 /* ---------- judging donut */
 .donut-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-top: 10px; }

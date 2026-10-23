@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261023.2233";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261023.2233";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261023.2247";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261023.2247";
 
-const APP_VERSION = "20261023.2233"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261023.2247"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -206,8 +206,12 @@ const pickCheckpoint = (list, wanted) =>
   list.find((c) => c.id === Number(wanted)) || list.find((c) => cpTimeState(c) === "live") ||
   list.find((c) => { try { return c.id === Number(localStorage.getItem("cp")); } catch { return false; } }) || list.find((c) => cpTimeState(c) === "upcoming") || list[0];
 const cpOption = (c, sel) => `<option value="${c.id}" ${c.id === sel.id ? "selected" : ""}>${esc(c.name)}${cpWindow(c) ? ` (${esc(cpWindow(c))})` : ""}</option>`;
+// table / team numbers: natural order ("2" before "10"), unnumbered teams last
+const byTable = (a, b) =>
+  (a.table_no || "\uffff").localeCompare(b.table_no || "\uffff", undefined, { numeric: true }) || a.name.localeCompare(b.name);
+const tableTag = (t, cls = "badge info") => (t.table_no ? `<span class="${cls}">Table ${esc(t.table_no)}</span>` : "");
 const getTeams = async () =>
-  must(await sb.from("teams").select("id,name,declared_size,college,participants(id,name,email,phone,is_leader,token,email_status,email_sent_at,email_error)").order("name"));
+  must(await sb.from("teams").select("id,name,declared_size,college,table_no,participants(id,name,email,phone,is_leader,token,email_status,email_sent_at,email_error)").order("name"));
 const getParticipants = async () =>
   must(await sb.from("participants").select("id,name,email,phone,token,email_status,email_error,team_id,teams(name)").order("name"));
 
@@ -225,6 +229,7 @@ const ICON_PATHS = {
   results: '<path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6M18 9h1.5a2.5 2.5 0 0 0 0-5H18M4 22h16M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0z"/>',
   settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
   account: '<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>',
+  assign: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
   x: '<path d="M18 6 6 18M6 6l12 12"/>',
@@ -262,6 +267,7 @@ const ROUTES = {
   emails: { label: "QR emails", icon: "emails", roles: ["admin"], view: viewEmails },
   scan: { label: "Scan", icon: "scan", roles: ["admin", "volunteer"], view: viewScan },
   judge: { label: "Judge", icon: "judge", roles: ["admin", "mentor"], view: viewJudge },
+  assign: { label: "Assign judges", icon: "assign", roles: ["admin"], view: viewAssign },
   results: { label: "Results", icon: "results", roles: ["admin"], view: viewResults },
   settings: { label: "Settings", icon: "settings", roles: ["admin"], view: viewSettings },
   account: { label: "Account", icon: "account", roles: ["admin", "volunteer", "mentor"], view: viewAccount },
@@ -684,22 +690,118 @@ function editParticipant(p, teams) {
   });
 }
 
+function editTeam(t, teams) {
+  modal(`
+    <h2>Edit team</h2>
+    <form id="tf">
+      <div class="field"><label>Team name</label><input name="name" required value="${esc(t.name)}"></div>
+      <div class="row"><div class="grow"><label>Table / team number</label><input name="table_no" value="${esc(t.table_no)}" placeholder="e.g. 12 or A-07"></div>
+        <div class="grow"><label>College</label><input name="college" value="${esc(t.college)}"></div></div>
+      <p class="small muted" id="tf-warn"></p>
+      <div class="actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+    </form>`, (m, close) => {
+    const tno = $("[name=table_no]", m);
+    tno.oninput = () => {
+      const clash = teams.find((x) => x.id !== t.id && x.table_no && x.table_no.toLowerCase() === tno.value.trim().toLowerCase());
+      $("#tf-warn", m).textContent = clash ? `Table ${tno.value.trim()} is already used by ${clash.name}.` : "";
+    };
+    $("#tf", m).onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const row = { name: f.get("name").trim(), table_no: f.get("table_no").trim() || null, college: f.get("college").trim() || null };
+      try { must(await sb.from("teams").update(row).eq("id", t.id)); toast("Team saved", "ok"); close(); route(); }
+      catch (er) { toast(er.message.includes("teams_name_key") ? "Another team already has that name" : er.message, "bad"); }
+    };
+  });
+}
+
+function numberTables(teams) {
+  const numbered = teams.filter((t) => t.table_no).length;
+  modal(`
+    <h2>Table numbers</h2>
+    <p class="small muted" style="margin-top:0">Give every team a table / team number. Judges see it next to the team name. You can still change single teams with <b>Edit</b>.</p>
+    <form id="nf">
+      <div class="field"><label>Order</label><select name="order">
+        <option value="name">Team name A→Z</option><option value="college">College, then team name</option><option value="table">Keep current table order</option></select></div>
+      <div class="row"><div class="grow"><label>Start at</label><input name="start" type="number" min="0" value="1"></div>
+        <div class="grow"><label>Prefix (optional)</label><input name="prefix" placeholder="e.g. T-"></div>
+        <div class="grow"><label>Digits</label><select name="pad"><option value="0">1, 2 … 93</option><option value="2">01, 02 …</option><option value="3">001, 002 …</option></select></div></div>
+      <label class="check"><input type="checkbox" name="only_missing" ${numbered ? "checked" : ""}> Only teams without a number (${teams.length - numbered} of ${teams.length})</label>
+      <p class="small muted" id="nf-preview"></p>
+      <div class="actions">${numbered ? '<button type="button" class="btn danger" id="nf-clear">Clear all numbers</button>' : ""}
+        <button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Apply</button></div>
+    </form>`, (m, close) => {
+    const form = $("#nf", m);
+    const plan = () => {
+      const f = new FormData(form);
+      const order = f.get("order");
+      const list = [...teams].sort(order === "table" ? byTable
+        : order === "college" ? (a, b) => (a.college || "").localeCompare(b.college || "") || a.name.localeCompare(b.name)
+        : (a, b) => a.name.localeCompare(b.name));
+      const used = new Set(teams.filter((t) => t.table_no).map((t) => t.table_no.toLowerCase()));
+      const onlyMissing = f.get("only_missing") === "on";
+      let n = Number(f.get("start")) || 0;
+      const label = () => `${f.get("prefix").trim()}${String(n).padStart(Number(f.get("pad")), "0")}`;
+      const out = [];
+      for (const t of list) {
+        if (onlyMissing && t.table_no) continue;
+        if (onlyMissing) while (used.has(label().toLowerCase())) n++;
+        out.push({ t, no: label() });
+        n++;
+      }
+      return out;
+    };
+    const preview = () => {
+      const p = plan();
+      $("#nf-preview", m).textContent = p.length
+        ? `${p.length} team(s): ${p.slice(0, 3).map((x) => `${x.t.name} → ${x.no}`).join(", ")}${p.length > 3 ? " …" : ""}`
+        : "Nothing to number.";
+    };
+    form.oninput = preview;
+    preview();
+    const save = async (rows, btn) => {
+      btn.disabled = true;
+      try {
+        for (let i = 0; i < rows.length; i += 10) {
+          await Promise.all(rows.slice(i, i + 10).map(({ id, table_no }) => sb.from("teams").update({ table_no }).eq("id", id).then(must)));
+          btn.textContent = `Saving ${Math.min(i + 10, rows.length)}/${rows.length}…`;
+        }
+        toast(`Updated ${rows.length} team(s)`, "ok"); close(); route();
+      } catch (er) { toast(er.message, "bad"); btn.disabled = false; btn.textContent = "Retry"; }
+    };
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const p = plan();
+      if (!p.length) return toast("Nothing to number", "bad");
+      save(p.map(({ t, no }) => ({ id: t.id, table_no: no })), $("button.primary", form));
+    };
+    const clr = $("#nf-clear", m);
+    if (clr) clr.onclick = async () => {
+      if (!(await confirmBox("Remove the table number from every team?", "Clear all", true))) return;
+      save(teams.filter((t) => t.table_no).map((t) => ({ id: t.id, table_no: null })), clr);
+    };
+  });
+}
+
 async function viewTeams(main) {
   const teams = await getTeams();
   const total = teams.reduce((n, t) => n + t.participants.length, 0);
   main.innerHTML = `
     <div class="page-head"><div><h1>Teams & QR codes</h1><p class="muted">${teams.length} teams · ${total} participants</p></div>
       <div class="row"><button class="btn" id="add-team">+ Team</button><button class="btn" id="add-p" ${teams.length ? "" : "disabled"}>+ Participant</button>
+      <button class="btn" id="number">Table numbers…</button>
       <button class="btn" id="exp">Export CSV</button><a class="btn" href="#/print">Print badges</a></div></div>
-    <div class="row" style="margin-bottom:14px"><input class="grow" id="q" placeholder="Search team, college, name, email, phone or code…">
+    <div class="row" style="margin-bottom:14px"><input class="grow" id="q" placeholder="Search team, table, college, name, email, phone or code…">
+      <select id="sort" style="width:auto"><option value="name">Sort: name</option><option value="table">Sort: table no.</option></select>
       <select id="filter" style="width:auto"><option value="">All</option><option value="pending">Not mailed</option><option value="sent">Mailed</option><option value="failed">Mail failed</option><option value="noemail">No email</option></select></div>
     <div id="list"></div>`;
 
   const draw = () => {
     const q = $("#q").value.trim().toLowerCase(), fl = $("#filter").value;
+    teams.sort($("#sort").value === "table" ? byTable : (a, b) => a.name.localeCompare(b.name));
     const match = (p) => (!fl || (fl === "noemail" ? !p.email : p.email && p.email_status === fl));
     const rows = teams.map((t) => {
-      const teamHit = !q || `${t.name} ${t.college || ""}`.toLowerCase().includes(q);
+      const teamHit = !q || `${t.name} ${t.college || ""} table ${t.table_no || "-"}`.toLowerCase().includes(q);
       const ms = t.participants.filter((p) => match(p) && (teamHit || [p.name, p.email, p.phone, p.token].some((v) => (v || "").toLowerCase().includes(q))));
       return { t, ms };
     }).filter((x) => x.ms.length || (!fl && (!q || x.t.name.toLowerCase().includes(q))));
@@ -708,11 +810,12 @@ async function viewTeams(main) {
       const sorted = [...ms].sort((a, b) => b.is_leader - a.is_leader || a.name.localeCompare(b.name));
       return `<details class="team" ${q || fl ? "open" : ""}>
         <summary><span class="name">${esc(t.name)}${t.college ? ` <span class="small muted" style="font-weight:400">· ${esc(t.college)}</span>` : ""}</span>
+          ${tableTag(t)}
           <span class="badge">${t.participants.length} member${t.participants.length === 1 ? "" : "s"}</span>
           ${t.declared_size && t.declared_size !== t.participants.length ? `<span class="badge warn">size ${t.declared_size}</span>` : ""}
           <span class="badge ${sent === t.participants.length && sent ? "ok" : ""}">${sent}/${t.participants.length} mailed</span>
           <button class="btn sm primary" data-team-mail="${t.id}" title="Email every member's QR to the team leader">✉ Email QRs</button>
-          <button class="btn sm" data-team-edit="${t.id}">Rename</button>
+          <button class="btn sm" data-team-edit="${t.id}">Edit</button>
           <button class="btn sm danger" data-team-del="${t.id}">Delete</button></summary>
         <div class="members">${sorted.map((p) => `
           <div class="member"><div class="who"><b>${esc(p.name)}</b> ${p.is_leader ? '<span class="badge brand">Lead</span>' : ""}<br>
@@ -725,6 +828,8 @@ async function viewTeams(main) {
   draw();
   $("#q").oninput = draw;
   $("#filter").onchange = draw;
+  $("#sort").onchange = draw;
+  $("#number").onclick = () => numberTables(teams);
 
   const findP = (id) => { for (const t of teams) for (const p of t.participants) if (p.id === id) return [p, t]; return []; };
   $("#list").onclick = async (e) => {
@@ -733,13 +838,7 @@ async function viewTeams(main) {
     e.preventDefault();
     if (b.dataset.qr) { const [p, t] = findP(Number(b.dataset.qr)); showQr(p, t); }
     if (b.dataset.edit) { const [p, t] = findP(Number(b.dataset.edit)); editParticipant({ ...p, team_id: t.id }, teams); }
-    if (b.dataset.teamEdit) {
-      const t = teams.find((x) => x.id === Number(b.dataset.teamEdit));
-      const name = prompt("Team name", t.name);
-      if (name && name.trim() !== t.name) {
-        try { must(await sb.from("teams").update({ name: name.trim() }).eq("id", t.id)); route(); } catch (er) { toast(er.message, "bad"); }
-      }
-    }
+    if (b.dataset.teamEdit) editTeam(teams.find((x) => x.id === Number(b.dataset.teamEdit)), teams);
     if (b.dataset.teamMail) await emailTeam(teams.find((x) => x.id === Number(b.dataset.teamMail)), b);
     if (b.dataset.teamDel) {
       const t = teams.find((x) => x.id === Number(b.dataset.teamDel));
@@ -755,8 +854,8 @@ async function viewTeams(main) {
   };
   $("#add-p").onclick = () => editParticipant({ name: "", email: "", phone: "", team_id: teams[0]?.id }, teams);
   $("#exp").onclick = () => download("participants_qr.csv", toCSV([
-    ["Team", "Name", "Email", "Phone", "Leader", "QR code", "Email status"],
-    ...teams.flatMap((t) => t.participants.map((p) => [t.name, p.name, p.email, p.phone, p.is_leader ? "yes" : "", p.token, p.email_status])),
+    ["Table", "Team", "Name", "Email", "Phone", "Leader", "QR code", "Email status"],
+    ...teams.flatMap((t) => t.participants.map((p) => [t.table_no, t.name, p.name, p.email, p.phone, p.is_leader ? "yes" : "", p.token, p.email_status])),
   ]));
 }
 
@@ -766,7 +865,7 @@ async function viewPrint(main) {
     <div class="page-head no-print"><div><h1>Print badges</h1><p class="muted">One QR per participant, grouped by team. Use your browser's print (Ctrl+P).</p></div>
       <div class="row"><a class="btn" href="#/teams">Back</a><button class="btn primary" onclick="print()">Print</button></div></div>
     <div class="badges">${teams.flatMap((t) => t.participants.map((p) => `
-      <div class="badge-card">${qrSvg(p.token)}<div class="n">${esc(p.name)}</div><div class="t">${esc(t.name)}</div><div class="t code">${esc(p.token)}</div></div>`)).join("")}</div>`;
+      <div class="badge-card">${qrSvg(p.token)}<div class="n">${esc(p.name)}</div><div class="t">${esc(t.name)}${t.table_no ? ` · Table ${esc(t.table_no)}` : ""}</div><div class="t code">${esc(p.token)}</div></div>`)).join("")}</div>`;
 }
 
 // ------------------------------------------------------------------ checkpoints
@@ -836,7 +935,7 @@ async function viewCheckpoints(main) {
     <td>${c.type === "scan" ? '<span class="badge info">QR scan · volunteers</span>' : '<span class="badge warn">Judging · mentors</span>'}</td>
     <td class="small">${c.type === "judging" ? c.criteria.map((x) => `${esc(x.name)} (${x.max})`).join(", ") : "—"}</td>
     <td><button class="btn sm" data-toggle="${c.id}">${c.active ? "✓ Open" : "Closed"}</button></td>
-    <td><button class="btn sm" data-edit="${c.id}">Edit</button></td></tr>`;
+    <td class="row">${c.type === "judging" ? `<a class="btn sm" href="#/assign/${c.id}">Assign judges</a>` : ""}<button class="btn sm" data-edit="${c.id}">Edit</button></td></tr>`;
   main.innerHTML = `
     <div class="page-head"><div><h1>Checkpoints</h1><p class="muted">Mark each checkpoint as a <b>QR scan</b> (volunteers) or <b>judging</b> round (mentors grade teams).</p></div>
       <button class="btn primary" id="new">+ New checkpoint</button></div>
@@ -1207,6 +1306,16 @@ async function viewScan(main, cpId) {
 }
 
 // ------------------------------------------------------------------ judging
+// Which teams may the signed-in person judge in this round? (mirrors public.can_judge in the database)
+async function judgeScope(cp) {
+  await loadSettings();
+  const on = state.settings.assign_mentors === "on";
+  const rows = on ? must(await sb.from("judge_assignments").select("team_id,judge_email").eq("checkpoint_id", cp.id)) : [];
+  const restricted = on && state.me.role === "mentor";
+  const allowed = restricted ? new Set(rows.filter((r) => r.judge_email === state.me.email).map((r) => r.team_id)) : null;
+  return { on, rows, restricted, allowed };
+}
+
 async function viewJudge(main, cpId, teamId) {
   const cps = (await getCheckpoints()).filter((c) => c.type === "judging" && c.active);
   if (!cps.length) {
@@ -1214,31 +1323,54 @@ async function viewJudge(main, cpId, teamId) {
     return;
   }
   const cp = pickCheckpoint(cps, cpId);
-  if (teamId) return judgeTeam(main, cp, Number(teamId));
+  const scope = await judgeScope(cp);
+  if (teamId) return judgeTeam(main, cp, Number(teamId), scope);
 
-  const [teams, mine] = await Promise.all([
-    sb.from("teams").select("id,name,participants(count)").order("name").then(must),
+  const [allTeams, mine, staff] = await Promise.all([
+    sb.from("teams").select("id,name,table_no,college,participants(count)").then(must),
     sb.from("scores").select("team_id,total").eq("checkpoint_id", cp.id).eq("judge_id", state.user.id).then(must),
+    scope.on && state.me.role === "admin" ? sb.from("staff").select("email,name").then(must) : [],
   ]);
+  const teams = (scope.restricted ? allTeams.filter((t) => scope.allowed.has(t.id)) : allTeams).sort(byTable);
   const scored = new Map(mine.map((s) => [s.team_id, s.total]));
   const max = cp.criteria.reduce((n, c) => n + Number(c.max), 0);
+  const names = new Map(staff.map((s) => [s.email, s.name]));
+  const judgesOf = (id) => scope.rows.filter((r) => r.team_id === id).map((r) => names.get(r.judge_email) || r.judge_email);
+  const doneCount = teams.filter((t) => scored.has(t.id)).length;
 
   main.innerHTML = `
-    <div class="page-head"><div><h1>Judging</h1><p class="muted">You've graded ${scored.size} of ${teams.length} teams</p></div>
-      <select id="cp" style="width:auto;min-width:200px">${cps.map((c) => cpOption(c, cp)).join("")}</select></div>
-    <div class="scan-layout">
+    <div class="page-head"><div><h1>Judging</h1>
+      <p class="muted">${esc(cp.name)} · you've graded <b>${doneCount}</b> of ${teams.length} ${scope.restricted ? "teams assigned to you" : "teams"}</p></div>
+      <div class="row"><select id="cp" style="width:auto;min-width:200px">${cps.map((c) => cpOption(c, cp)).join("")}</select>
+        ${state.me.role === "admin" ? `<a class="btn" href="#/assign/${cp.id}">Assign judges</a>` : ""}</div></div>
+    ${scope.restricted ? `<div class="notice info">You can judge the <b>${teams.length}</b> team${teams.length === 1 ? "" : "s"} assigned to you in this round. Go to the table number shown on each card.</div>` : ""}
+    ${scope.restricted && !teams.length ? `<div class="card empty">No teams are assigned to you in ${esc(cp.name)} yet. Ask an admin.</div>` : `
+    <div class="scan-layout ${scope.restricted ? "list-first" : ""}">
       <div class="card"><h3>Scan any team member's QR</h3><div id="reader"></div>
         <div class="row" style="margin-top:10px"><button class="btn" id="cam">Start camera</button><span class="small muted" id="cam-st"></span></div></div>
-      <div class="card"><div class="row" style="margin-bottom:10px"><h3 style="margin:0;flex:1">Or pick a team</h3><input id="q" placeholder="Filter…" style="max-width:200px"></div>
-        <div class="team-pick" id="tp"></div></div>
-    </div>`;
+      <div class="card"><div class="row" style="margin-bottom:10px"><h3 style="margin:0;flex:1">${scope.restricted ? "Your teams" : "Or pick a team"}</h3>
+        <select id="show" style="width:auto"><option value="">All</option><option value="todo">To judge</option><option value="done">Judged</option></select>
+        <input id="q" placeholder="Table or team…" style="max-width:170px"></div>
+        <div class="judge-grid" id="tp"></div></div>
+    </div>`}`;
+  if (!$("#tp")) { $("#cp").onchange = (e) => (location.hash = `#/judge/${e.target.value}`); return; }
   const draw = () => {
-    const q = $("#q").value.toLowerCase();
-    $("#tp").innerHTML = teams.filter((t) => t.name.toLowerCase().includes(q)).map((t) => `<button class="btn" data-t="${t.id}" style="justify-content:space-between">
-      <span>${esc(t.name)}</span>${scored.has(t.id) ? `<span class="badge ok">${scored.get(t.id)}/${max}</span>` : '<span class="badge">—</span>'}</button>`).join("");
+    const q = $("#q").value.trim().toLowerCase(), show = $("#show").value;
+    $("#tp").innerHTML = teams
+      .filter((t) => `${t.table_no || ""} ${t.name} ${t.college || ""}`.toLowerCase().includes(q))
+      .filter((t) => !show || (show === "done") === scored.has(t.id))
+      .map((t) => {
+        const js = scope.on && state.me.role === "admin" ? judgesOf(t.id) : [];
+        return `<button class="judge-card ${scored.has(t.id) ? "is-done" : ""}" data-t="${t.id}">
+          <span class="tno">${t.table_no ? `<small>Table</small>${esc(t.table_no)}` : "<small>Table</small>—"}</span>
+          <span class="jt"><b>${esc(t.name)}</b><span class="small muted">${t.college ? esc(t.college) + " · " : ""}${t.participants[0]?.count ?? 0} members</span>
+            ${js.length ? `<span class="small muted">Judges: ${js.map(esc).join(", ")}</span>` : scope.on && state.me.role === "admin" ? '<span class="small" style="color:var(--warn)">No judge assigned</span>' : ""}</span>
+          ${scored.has(t.id) ? `<span class="badge ok">${scored.get(t.id)}/${max}</span>` : '<span class="badge">To judge</span>'}</button>`;
+      }).join("") || '<div class="empty">No matching teams</div>';
   };
   draw();
   $("#q").oninput = draw;
+  $("#show").onchange = draw;
   $("#tp").onclick = (e) => { const b = e.target.closest("[data-t]"); if (b) location.hash = `#/judge/${cp.id}/${b.dataset.t}`; };
   $("#cp").onchange = (e) => (location.hash = `#/judge/${e.target.value}`);
   $("#cam").onclick = async () => {
@@ -1248,6 +1380,7 @@ async function viewJudge(main, cpId, teamId) {
         const tok = code.toUpperCase().replace(/[^A-Z0-9]/g, "");
         const { data } = await sb.from("participants").select("team_id").eq("token", tok).maybeSingle();
         if (!data) { beep(false); toast("QR not recognised", "bad"); return; }
+        if (scope.restricted && !scope.allowed.has(data.team_id)) { beep(false); toast("This team isn't assigned to you in this round", "bad"); return; }
         beep(true);
         location.hash = `#/judge/${cp.id}/${data.team_id}`;
       });
@@ -1256,15 +1389,21 @@ async function viewJudge(main, cpId, teamId) {
   };
 }
 
-async function judgeTeam(main, cp, teamId) {
+async function judgeTeam(main, cp, teamId, scope) {
+  if (scope.restricted && !scope.allowed.has(teamId)) {
+    main.innerHTML = `<div class="page-head"><div><a href="#/judge/${cp.id}" class="small">← Your teams</a><h1>Not your team</h1></div></div>
+      <div class="card empty">This team isn't assigned to you in ${esc(cp.name)}. Ask an admin if that's wrong.</div>`;
+    return;
+  }
   const [team, existing] = await Promise.all([
-    sb.from("teams").select("id,name,college,participants(name,is_leader)").eq("id", teamId).single().then(must),
+    sb.from("teams").select("id,name,college,table_no,participants(name,is_leader)").eq("id", teamId).single().then(must),
     sb.from("scores").select("*").eq("checkpoint_id", cp.id).eq("team_id", teamId).eq("judge_id", state.user.id).maybeSingle().then(must),
   ]);
   const vals = existing?.scores || {};
   const max = cp.criteria.reduce((n, c) => n + Number(c.max), 0);
   main.innerHTML = `
-    <div class="page-head"><div><a href="#/judge/${cp.id}" class="small">← All teams</a><h1>${esc(team.name)}</h1>
+    <div class="page-head"><div><a href="#/judge/${cp.id}" class="small">← All teams</a>
+      <h1>${team.table_no ? `<span class="h-tno">Table ${esc(team.table_no)}</span> ` : ""}${esc(team.name)}</h1>
       <p class="muted">${esc(cp.name)}${team.college ? " · " + esc(team.college) : ""} · ${team.participants.map((p) => esc(p.name) + (p.is_leader ? " (lead)" : "")).join(", ")}</p></div></div>
     <form class="card" id="sf" style="max-width:640px">
       ${cp.criteria.map((c, i) => `<div class="crit"><div><label>${esc(c.name)} <span class="muted">/ ${c.max}</span></label>
@@ -1299,7 +1438,160 @@ async function judgeTeam(main, cp, teamId) {
       }, { onConflict: "checkpoint_id,team_id,judge_id" }));
       toast(`Saved ${team.name}: ${total}/${max}`, "ok");
       location.hash = `#/judge/${cp.id}`;
+    } catch (er) {
+      toast(/row-level security/i.test(er.message) ? "You can't score this team in this round (not assigned, or the round is closed)" : er.message, "bad");
+    }
+  };
+}
+
+// ------------------------------------------------------------------ judge assignments (admin)
+async function setAssignMode(on) {
+  must(await sb.from("settings").upsert({ key: "assign_mentors", value: on ? "on" : "off" }));
+  state.settings.assign_mentors = on ? "on" : "off";
+}
+
+async function viewAssign(main, cpId) {
+  await loadSettings();
+  const cps = (await getCheckpoints()).filter((c) => c.type === "judging");
+  if (!cps.length) {
+    main.innerHTML = `<h1>Assign judges</h1><div class="card empty">No judging rounds yet. <a href="#/checkpoints">Create a judging checkpoint</a> first.</div>`;
+    return;
+  }
+  const cp = cps.find((c) => c.id === Number(cpId)) || cps[0];
+  const [teams, mentors, all] = await Promise.all([
+    sb.from("teams").select("id,name,table_no,college").then(must),
+    sb.from("staff").select("email,name").eq("role", "mentor").order("name").then(must),
+    sb.from("judge_assignments").select("id,checkpoint_id,team_id,judge_email").then(must),
+  ]);
+  teams.sort(byTable);
+  let here = all.filter((r) => r.checkpoint_id === cp.id);
+  const on = state.settings.assign_mentors === "on";
+  const nameOf = (e) => mentors.find((m) => m.email === e)?.name || e;
+  const others = cps.filter((c) => c.id !== cp.id && all.some((r) => r.checkpoint_id === c.id));
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Assign judges</h1><p class="muted">Pick which mentors judge which teams, separately for each judging round.</p></div>
+      <select id="cp" style="width:auto;min-width:200px">${cps.map((c) => `<option value="${c.id}" ${c.id === cp.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></div>
+    <div class="card assign-mode ${on ? "on" : ""}">
+      <label class="switch"><input type="checkbox" id="mode" ${on ? "checked" : ""}><span class="slider"></span></label>
+      <div><b>${on ? "Assignments are ON" : "Assignments are OFF"}</b><br><span class="small muted">${on
+        ? "Mentors can only judge the teams assigned to them in each round. Teams with no judge can only be scored by admins."
+        : "Any mentor can judge any team. Assignments below are saved but not enforced until you switch this on."}</span></div>
+    </div>
+    ${!mentors.length ? `<div class="notice">No mentors yet – add people with the Mentor role under <a href="#/staff">Staff</a>.</div>` : ""}
+    <div class="grid two">
+      <form class="card" id="auto">
+        <h2>Auto-assign</h2>
+        <div class="field"><label>Mentors to use</label><div class="chips" id="pick">${mentors.map((m) =>
+          `<label class="chip"><input type="checkbox" name="m" value="${esc(m.email)}" checked><span>${esc(m.name)}</span></label>`).join("")}</div></div>
+        <div class="row"><div class="grow"><label>Judges per team</label><input type="number" name="k" min="1" max="${Math.max(1, mentors.length)}" value="${Math.min(2, Math.max(1, mentors.length))}"></div>
+          <label class="check" style="margin-top:20px"><input type="checkbox" name="only" checked> Only teams with no judge yet</label></div>
+        <p class="small muted">Teams are shared out in table order so each mentor gets about the same number, and neighbouring tables go to the same mentors where possible.</p>
+        <button class="btn primary" ${mentors.length ? "" : "disabled"}>Distribute</button>
+      </form>
+      <div class="card">
+        <h2>Shortcuts</h2>
+        ${others.length ? `<div class="row" style="margin-bottom:10px"><select id="copy-from" class="grow">${others.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select>
+          <button class="btn" id="copy">Copy into ${esc(cp.name)}</button></div>` : '<p class="small muted">Once another round has assignments you can copy them here.</p>'}
+        <button class="btn danger" id="clear" ${here.length ? "" : "disabled"}>Clear all assignments in ${esc(cp.name)}</button>
+        <h3 style="margin-top:18px">Load per mentor</h3><div class="chips" id="load"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row" style="margin-bottom:10px"><h2 style="margin:0;flex:1">Teams <span class="muted small" id="summary"></span></h2>
+        <select id="show" style="width:auto"><option value="">All teams</option><option value="none">No judge yet</option></select>
+        <input id="q" placeholder="Table or team…" style="max-width:200px"></div>
+      <div class="table-wrap"><table><thead><tr><th>Table</th><th>Team</th><th>Judges in ${esc(cp.name)}</th><th></th></tr></thead><tbody id="rows"></tbody></table></div>
+    </div>`;
+
+  const byTeam = () => {
+    const m = new Map();
+    here.forEach((r) => m.set(r.team_id, [...(m.get(r.team_id) || []), r]));
+    return m;
+  };
+  const draw = () => {
+    const map = byTeam(), q = $("#q").value.trim().toLowerCase(), show = $("#show").value;
+    const none = teams.filter((t) => !map.has(t.id)).length;
+    $("#summary").textContent = `· ${teams.length - none} assigned · ${none} without a judge`;
+    const load = new Map(mentors.map((m) => [m.email, 0]));
+    here.forEach((r) => load.set(r.judge_email, (load.get(r.judge_email) || 0) + 1));
+    $("#load").innerHTML = mentors.map((m) => `<span class="chip static"><span>${esc(m.name)}</span><b>${load.get(m.email)}</b></span>`).join("") || '<span class="small muted">—</span>';
+    $("#rows").innerHTML = teams
+      .filter((t) => `${t.table_no || ""} ${t.name} ${t.college || ""}`.toLowerCase().includes(q))
+      .filter((t) => show !== "none" || !map.has(t.id))
+      .map((t) => {
+        const rs = map.get(t.id) || [];
+        const free = mentors.filter((m) => !rs.some((r) => r.judge_email === m.email));
+        return `<tr><td><b>${esc(t.table_no || "—")}</b></td><td><b>${esc(t.name)}</b>${t.college ? `<br><span class="small muted">${esc(t.college)}</span>` : ""}</td>
+          <td><div class="chips">${rs.map((r) => `<span class="chip static">${esc(nameOf(r.judge_email))}<button type="button" data-del="${r.id}" title="Remove">×</button></span>`).join("")
+            || '<span class="small" style="color:var(--warn)">No judge</span>'}</div></td>
+          <td>${free.length ? `<select data-add="${t.id}" style="width:auto"><option value="">+ Add judge</option>${free.map((m) => `<option value="${esc(m.email)}">${esc(m.name)}</option>`).join("")}</select>` : ""}</td></tr>`;
+      }).join("") || '<tr><td colspan="4" class="empty">No matching teams</td></tr>';
+  };
+  draw();
+  $("#q").oninput = draw;
+  $("#show").onchange = draw;
+  $("#cp").onchange = (e) => (location.hash = `#/assign/${e.target.value}`);
+  $("#mode").onchange = async (e) => {
+    try { await setAssignMode(e.target.checked); toast(e.target.checked ? "Assignments switched on" : "Assignments switched off", "ok"); route(); }
+    catch (er) { toast(er.message, "bad"); e.target.checked = !e.target.checked; }
+  };
+  $("#rows").onchange = async (e) => {
+    const sel = e.target.closest("[data-add]");
+    if (!sel || !sel.value) return;
+    try {
+      const row = must(await sb.from("judge_assignments").insert({ checkpoint_id: cp.id, team_id: Number(sel.dataset.add), judge_email: sel.value }).select().single());
+      here.push(row); draw();
     } catch (er) { toast(er.message, "bad"); }
+  };
+  $("#rows").onclick = async (e) => {
+    const b = e.target.closest("[data-del]");
+    if (!b) return;
+    try { must(await sb.from("judge_assignments").delete().eq("id", Number(b.dataset.del))); here = here.filter((r) => r.id !== Number(b.dataset.del)); draw(); }
+    catch (er) { toast(er.message, "bad"); }
+  };
+  const replaceRound = async (rows, keepExisting) => {
+    if (!keepExisting) must(await sb.from("judge_assignments").delete().eq("checkpoint_id", cp.id));
+    for (let i = 0; i < rows.length; i += 200) must(await sb.from("judge_assignments").insert(rows.slice(i, i + 200)));
+  };
+  $("#auto").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const pool = f.getAll("m");
+    const k = Math.min(Number(f.get("k")) || 1, pool.length);
+    const only = f.get("only") === "on";
+    if (!pool.length) return toast("Pick at least one mentor", "bad");
+    const map = byTeam();
+    const targets = teams.filter((t) => !only || !map.has(t.id));
+    if (!targets.length) return toast("Every team already has a judge", "bad");
+    if (!only && here.length && !(await confirmBox(`Replace all ${here.length} existing assignments in <b>${esc(cp.name)}</b>?`, "Replace", true))) return;
+    // least-loaded first; ties go round-robin so neighbouring tables share mentors
+    const load = new Map(pool.map((m) => [m, 0]));
+    if (only) here.forEach((r) => load.has(r.judge_email) && load.set(r.judge_email, load.get(r.judge_email) + 1));
+    let turn = 0;
+    const rows = [];
+    for (const t of targets) {
+      const order = pool.map((m, i) => ({ m, l: load.get(m), r: (i - turn + pool.length) % pool.length })).sort((a, b) => a.l - b.l || a.r - b.r);
+      order.slice(0, k).forEach(({ m }) => { rows.push({ checkpoint_id: cp.id, team_id: t.id, judge_email: m }); load.set(m, load.get(m) + 1); });
+      turn = (turn + k) % pool.length;
+    }
+    const btn = $("button.primary", e.target);
+    btn.disabled = true;
+    try { await replaceRound(rows, only); toast(`Assigned ${targets.length} teams (${rows.length} assignments)`, "ok"); route(); }
+    catch (er) { toast(er.message, "bad"); btn.disabled = false; }
+  };
+  const copy = $("#copy");
+  if (copy) copy.onclick = async () => {
+    const from = Number($("#copy-from").value);
+    const src = all.filter((r) => r.checkpoint_id === from);
+    if (!(await confirmBox(`Copy ${src.length} assignments into <b>${esc(cp.name)}</b>? ${here.length ? "Existing ones in this round are replaced." : ""}`, "Copy"))) return;
+    try { await replaceRound(src.map((r) => ({ checkpoint_id: cp.id, team_id: r.team_id, judge_email: r.judge_email })), false); toast("Copied", "ok"); route(); }
+    catch (er) { toast(er.message, "bad"); }
+  };
+  $("#clear").onclick = async () => {
+    if (!(await confirmBox(`Remove all ${here.length} assignments in <b>${esc(cp.name)}</b>?`, "Clear", true))) return;
+    try { must(await sb.from("judge_assignments").delete().eq("checkpoint_id", cp.id)); toast("Cleared"); route(); }
+    catch (er) { toast(er.message, "bad"); }
   };
 }
 
@@ -1310,7 +1602,7 @@ async function viewResults(main, cpId) {
   const scanCps = cps.filter((c) => c.type === "scan");
   const cp = judging.find((c) => c.id === Number(cpId)) || judging[0];
   const [teams, scores] = await Promise.all([
-    sb.from("teams").select("id,name").order("name").then(must),
+    sb.from("teams").select("id,name,table_no").order("name").then(must),
     cp ? sb.from("scores").select("*").eq("checkpoint_id", cp.id).then(must) : [],
   ]);
   let board = "";
@@ -1324,7 +1616,7 @@ async function viewResults(main, cpId) {
     }).sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1));
     board = `<div class="table-wrap"><table><thead><tr><th>#</th><th>Team</th><th>Avg total / ${max}</th><th>Judges</th>
       ${cp.criteria.map((c) => `<th>${esc(c.name)}</th>`).join("")}<th></th></tr></thead><tbody>
-      ${rows.map((r, i) => `<tr><td>${r.avg == null ? "" : i + 1}</td><td><b>${esc(r.t.name)}</b></td>
+      ${rows.map((r, i) => `<tr><td>${r.avg == null ? "" : i + 1}</td><td><b>${esc(r.t.name)}</b>${r.t.table_no ? ` <span class="small muted">· Table ${esc(r.t.table_no)}</span>` : ""}</td>
         <td>${r.avg == null ? '<span class="muted">not graded</span>' : `<b>${r.avg.toFixed(2)}</b>`}</td><td>${r.s.length}</td>
         ${r.per.map((v) => `<td>${v == null ? "" : v.toFixed(1)}</td>`).join("")}
         <td>${r.s.length ? `<button class="btn sm" data-detail="${r.t.id}">Details</button>` : ""}</td></tr>`).join("")}
@@ -1374,6 +1666,13 @@ async function viewSettings(main) {
   const s = state.settings;
   main.innerHTML = `
     <div class="page-head"><div><h1>Settings</h1></div></div>
+    <div class="card assign-mode ${s.assign_mentors === "on" ? "on" : ""}" style="max-width:720px">
+      <label class="switch"><input type="checkbox" id="mode" ${s.assign_mentors === "on" ? "checked" : ""}><span class="slider"></span></label>
+      <div style="flex:1"><b>Assign mentors to teams</b><br><span class="small muted">${s.assign_mentors === "on"
+        ? "On – each mentor can only judge the teams assigned to them, set separately for every judging round."
+        : "Off – any mentor can judge any team."}</span></div>
+      <a class="btn sm" href="#/assign">Assign judges</a>
+    </div>
     <form class="card" id="sf" style="max-width:720px">
       <div class="field"><label>Event name</label><input name="event_name" value="${esc(s.event_name)}"></div>
       <div class="field"><label>QR email subject</label><input name="email_subject" value="${esc(s.email_subject)}"></div>
@@ -1381,6 +1680,10 @@ async function viewSettings(main) {
         <p class="small muted">Placeholders: <code>{{name}}</code> <code>{{team}}</code> <code>{{event}}</code> <code>{{code}}</code>. The QR image and pass code are added below the message automatically.</p></div>
       <button class="btn primary">Save</button>
     </form>`;
+  $("#mode").onchange = async (e) => {
+    try { await setAssignMode(e.target.checked); toast(e.target.checked ? "Mentor assignments on" : "Mentor assignments off", "ok"); route(); }
+    catch (er) { toast(er.message, "bad"); e.target.checked = !e.target.checked; }
+  };
   $("#sf").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
