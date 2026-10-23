@@ -75,26 +75,57 @@ function qrSvg(text) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#fff"/>
     <path d="${path}" fill="${QR_INK}"/><image href="assets/qr-badge.png" x="${o}" y="${o}" width="${b}" height="${b}"/></svg>`;
 }
-async function qrPng(text, label, sub) {
+const SDG_COLOURS = ["#E5243B", "#DDA63A", "#4C9F38", "#C5192D", "#FF3A21", "#26BDE2", "#FCC30B", "#A21942", "#FD6925",
+  "#DD1367", "#FD9D24", "#BF8B2E", "#3F7E44", "#0A97D9", "#56C02B", "#00689D", "#19486A"];
+// Pass image: SDG strip, QR with logo, then name, pass code and team. Used for downloads and emails.
+async function qrPng(text, name, team) {
   if (!QR_BADGE.complete) await new Promise((r) => { QR_BADGE.onload = QR_BADGE.onerror = r; });
+  try { await document.fonts?.load("800 32px 'Plus Jakarta Sans'"); } catch { /* fallback font */ }
   const q = qrMatrix(text);
-  const n = q.getModuleCount(), cell = 14, m = 4, w = (n + m * 2) * cell, extra = label ? 96 : 0;
-  const cv = Object.assign(document.createElement("canvas"), { width: w, height: w + extra });
+  const n = q.getModuleCount(), cell = 14, m = 4, w = (n + m * 2) * cell;
+  const strip = 8, top = strip, info = name ? 128 : 0, h = top + w + info + (name ? strip : 0);
+  const cv = Object.assign(document.createElement("canvas"), { width: w, height: h });
   const ctx = cv.getContext("2d");
-  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h);
+  const bar = (y) => SDG_COLOURS.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(Math.floor((i * w) / 17), y, Math.ceil(w / 17) + 1, strip); });
+  bar(0);
   ctx.fillStyle = QR_INK;
-  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (q.isDark(r, c)) ctx.fillRect((c + m) * cell, (r + m) * cell, cell, cell);
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (q.isDark(r, c)) ctx.fillRect((c + m) * cell, top + (r + m) * cell, cell, cell);
   if (QR_BADGE.naturalWidth) {
     const b = badgeModules(n) * cell;
-    ctx.drawImage(QR_BADGE, (w - b) / 2, (w - b) / 2, b, b);
+    ctx.drawImage(QR_BADGE, (w - b) / 2, top + (w - b) / 2, b, b);
   }
-  if (label) {
-    ctx.textAlign = "center";
+  if (name) {
+    const fit = (txt, weight, size, family, maxW) => {
+      let s = size;
+      do { ctx.font = `${weight} ${s}px ${family}`; s -= 1; } while (ctx.measureText(txt).width > maxW && s > 12);
+    };
+    const y0 = top + w - 26, max = w - 36;
+    ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
     ctx.fillStyle = QR_INK;
-    ctx.font = "700 30px 'Plus Jakarta Sans', Arial"; ctx.fillText(label, w / 2, w + 32);
-    ctx.font = "500 22px 'Plus Jakarta Sans', Arial"; ctx.fillStyle = "#475569"; ctx.fillText(sub || "", w / 2, w + 66);
+    fit(name, 800, 32, "'Plus Jakarta Sans', Arial", max);
+    ctx.fillText(name, w / 2, y0 + 30);
+    // pass code in a pill
+    const code = text.replace(/(.{4})(?=.)/g, "$1 ");
+    ctx.font = "700 26px ui-monospace, Consolas, 'Courier New', monospace";
+    const cw = ctx.measureText(code).width + 36, ch = 42, cx = (w - cw) / 2, cy = y0 + 48;
+    ctx.fillStyle = "#eef4fb";
+    ctx.beginPath(); ctx.roundRect ? ctx.roundRect(cx, cy, cw, ch, 21) : ctx.rect(cx, cy, cw, ch); ctx.fill();
+    ctx.fillStyle = "#1f78c1"; ctx.fillText(code, w / 2, cy + 30);
+    if (team) {
+      ctx.fillStyle = "#64708a";
+      fit(team, 600, 20, "'Plus Jakarta Sans', Arial", max);
+      ctx.fillText(team, w / 2, y0 + 124);
+    }
+    bar(h - strip);
   }
   return cv.toDataURL("image/png");
+}
+// base64 pass images for the email function, keyed by participant id
+async function passImages(people) {
+  const out = {};
+  for (const p of people) out[p.id] = (await qrPng(p.token, p.name, p.teamName)).split(",")[1];
+  return out;
 }
 
 let audioCtx;
@@ -513,9 +544,10 @@ function showQr(p, team) {
       } catch (e) { toast(e.message, "bad"); btn.disabled = false; btn.textContent = label; }
     };
     const one = $("#qr-mail", m);
-    if (one) one.onclick = () => send(one, { action: "send_qr", ids: [p.id] }, `QR sent to ${p.email}`);
+    const teamPeople = team.participants.map((x) => ({ ...x, teamName: team.name }));
+    if (one) one.onclick = async () => send(one, { action: "send_qr", ids: [p.id], images: await passImages([{ ...p, teamName: team.name }]) }, `QR sent to ${p.email}`);
     const all = $("#qr-team", m);
-    if (all) all.onclick = () => send(all, { action: "send_team", team_ids: [team.id] }, `${team.participants.length} QR codes sent to ${leader.email}`);
+    if (all) all.onclick = async () => send(all, { action: "send_team", team_ids: [team.id], images: await passImages(teamPeople) }, `${team.participants.length} QR codes sent to ${leader.email}`);
   });
 }
 
@@ -527,7 +559,8 @@ async function emailTeam(t, btn) {
   const label = btn?.textContent;
   if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
   try {
-    const { results } = await callAdmin({ action: "send_team", team_ids: [t.id] });
+    const images = await passImages(t.participants.map((x) => ({ ...x, teamName: t.name })));
+    const { results } = await callAdmin({ action: "send_team", team_ids: [t.id], images });
     if (!results[0]?.ok) throw new Error(results[0]?.error || "Failed");
     toast(`${t.participants.length} QR codes sent to ${leader.email}`, "ok");
     route();
@@ -922,8 +955,11 @@ async function viewEmails(main, modeArg) {
 
   $("#test").onclick = async (e) => {
     e.target.disabled = true;
-    try { await callAdmin({ action: "test_email", to: state.me.email }); toast(`Test email sent to ${state.me.email}`, "ok"); }
-    catch (er) { toast(`Email not working: ${er.message}`, "bad"); }
+    try {
+      const images = { sample: (await qrPng("SAMPLE12CODE", state.me.name, "Sample team")).split(",")[1] };
+      await callAdmin({ action: "test_email", to: state.me.email, images });
+      toast(`Test email sent to ${state.me.email}`, "ok");
+    } catch (er) { toast(`Email not working: ${er.message}`, "bad"); }
     e.target.disabled = false;
   };
   $("#stop").onclick = () => { mailJob.cancel = true; $("#job-st").textContent = "Stopping after this batch…"; };
@@ -955,7 +991,12 @@ async function viewEmails(main, modeArg) {
     for (let i = 0; i < list.length && !mailJob.cancel; i += BATCH) {
       const ids = list.slice(i, i + BATCH).map((x) => x.id);
       try {
-        const body = mode === "team" ? { action: "send_team", team_ids: ids } : { action: "send_qr", ids };
+        const chunk = list.slice(i, i + BATCH);
+        const people = mode === "team"
+          ? chunk.flatMap((t) => t.participants.map((x) => ({ ...x, teamName: t.name })))
+          : chunk.map((x) => ({ ...x, teamName: x.team.name }));
+        const images = await passImages(people);
+        const body = mode === "team" ? { action: "send_team", team_ids: ids, images } : { action: "send_qr", ids, images };
         const { results } = await callAdmin(body);
         results.forEach((r) => (r.ok ? ok++ : bad++));
       } catch (er) {
@@ -1089,7 +1130,7 @@ async function viewScan(main, cpId) {
       const q = $("#ms").value.trim().replace(/[,%()]/g, " ");
       if (q.length < 2) { $("#ms-res").innerHTML = ""; return; }
       const rows = must(await sb.from("participants").select("id,name,email,token,teams(name)")
-        .or(`name.ilike.%${q}%,email.ilike.%${q}%,token.ilike.%${q}%`).limit(8));
+        .or(`name.ilike.%${q}%,email.ilike.%${q}%,token.ilike.%${q.replace(/\s+/g, "")}%`).limit(8));
       $("#ms-res").innerHTML = rows.map((p) => `<div class="member"><div class="who"><b>${esc(p.name)}</b><br><span class="small muted">${esc(p.teams?.name)} · ${esc(p.email || "")}</span></div>
         <button class="btn sm primary" data-tok="${esc(p.token)}">Mark</button></div>`).join("") || '<div class="small muted" style="padding:8px">No match</div>';
     }, 250);

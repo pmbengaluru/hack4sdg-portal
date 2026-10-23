@@ -100,7 +100,19 @@ function qrPng(text: string): Buffer {
   return PNG.sync.write(png);
 }
 
-async function sendQr(ids: number[]) {
+// The admin's browser draws each pass (QR + name + code + team) and sends it as base64 PNG,
+// keyed by participant id. Anything missing or not a sane PNG falls back to the plain logo QR.
+type PassImages = Record<string, string>;
+function passPng(p: { id: number | string; token: string }, images?: PassImages): Buffer {
+  const b64 = images?.[String(p.id)];
+  if (typeof b64 === "string" && b64.length < 1_500_000) {
+    const buf = Buffer.from(b64, "base64");
+    if (buf.length > 100 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return buf;
+  }
+  return qrPng(p.token);
+}
+
+async function sendQr(ids: number[], images?: PassImages) {
   const s = await getSettings();
   const event = s.event_name || "Hackathon";
   const { data: people, error } = await db
@@ -118,14 +130,12 @@ async function sendQr(ids: number[]) {
     try {
       const team = (p as any).teams?.name ?? "";
       const vars = { name: p.name, team, event, code: p.token };
-      const png = qrPng(p.token);
+      const png = passPng(p, images);
       const message = esc(fill(s.email_message || "", vars)).replace(/\n/g, "<br>");
       const html = shell(event, `
         <p style="font-size:15px;line-height:1.55">${message}</p>
         <div style="text-align:center;margin:24px 0">
-          <img src="cid:qr" width="240" height="240" alt="QR code" style="border:1px solid #e5e7eb;border-radius:8px">
-          <div style="margin-top:10px;font-size:13px;color:#6b7280">Pass code: <b style="letter-spacing:2px;color:#111">${esc(p.token)}</b></div>
-          <div style="font-size:13px;color:#6b7280">Team: <b style="color:#111">${esc(team)}</b></div>
+          <img src="cid:qr" width="260" alt="QR pass for ${esc(p.name)} – code ${esc(p.token)}" style="width:260px;max-width:100%;height:auto;border:1px solid #e5e7eb;border-radius:12px">
         </div>`);
       await transporter.sendMail({
         from: FROM,
@@ -154,7 +164,7 @@ async function sendQr(ids: number[]) {
 
 // One email per team to the leader (cc any other member with an email) carrying every member's QR.
 // Used when the registration form only collected the leader's email.
-async function sendTeams(teamIds: number[]) {
+async function sendTeams(teamIds: number[], images?: PassImages) {
   const s = await getSettings();
   const event = s.event_name || "Hackathon";
   const { data: teams, error } = await db
@@ -179,13 +189,12 @@ async function sendTeams(teamIds: number[]) {
       const attachments: { filename: string; content: Uint8Array; cid?: string }[] = [LOGO_ATTACHMENT];
       const blocks: string[] = [];
       for (const [i, m] of members.entries()) {
-        const png = qrPng(m.token);
+        const png = passPng(m, images);
         attachments.push({ filename: `qr${i}.png`, content: png, cid: `qr${i}` });
         attachments.push({ filename: `${m.name.replace(/[^\w]+/g, "_")}_QR.png`, content: png });
         blocks.push(`<td style="text-align:center;padding:10px;vertical-align:top;width:50%">
-          <img src="cid:qr${i}" width="180" height="180" alt="QR for ${esc(m.name)}" style="border:1px solid #e5e7eb;border-radius:8px">
-          <div style="font-weight:700;margin-top:6px">${esc(m.name)}${m.is_leader ? " (Leader)" : ""}</div>
-          <div style="font-size:12px;color:#6b7280">Pass code <b style="letter-spacing:1px;color:#111">${esc(m.token)}</b></div></td>`);
+          <img src="cid:qr${i}" width="200" alt="QR pass for ${esc(m.name)} – code ${esc(m.token)}" style="width:200px;max-width:100%;height:auto;border:1px solid #e5e7eb;border-radius:12px">
+          ${m.is_leader ? '<div style="font-size:12px;color:#6b7280;margin-top:4px">Team leader</div>' : ""}</td>`);
       }
       const rows = [];
       for (let i = 0; i < blocks.length; i += 2) rows.push(`<tr>${blocks[i]}${blocks[i + 1] ?? "<td></td>"}</tr>`);
@@ -261,12 +270,12 @@ Deno.serve(async (req) => {
     switch (body.action) {
       case "send_qr": {
         const ids = (body.ids ?? []).slice(0, 25).map(Number);
-        return json({ results: await sendQr(ids) });
+        return json({ results: await sendQr(ids, body.images) });
       }
 
       case "send_team": {
         const ids = (body.team_ids ?? []).slice(0, 5).map(Number);
-        return json({ results: await sendTeams(ids) });
+        return json({ results: await sendTeams(ids, body.images) });
       }
 
       case "test_email": {
@@ -276,9 +285,9 @@ Deno.serve(async (req) => {
           to: body.to || email,
           subject: `${s.event_name || "Event"} – test email`,
           html: shell(s.event_name || "Event", `<p style="text-align:center">Email sending is working ✅</p>
-            <div style="text-align:center"><img src="cid:qr" width="200" height="200" alt="Sample QR">
+            <div style="text-align:center"><img src="cid:qr" width="240" alt="Sample QR pass" style="width:240px;max-width:100%;height:auto;border:1px solid #e5e7eb;border-radius:12px">
             <div style="font-size:12px;color:#6b7280">Sample QR – this is how passes will look</div></div>`),
-          attachments: [LOGO_ATTACHMENT, { filename: "sample.png", content: qrPng("SAMPLE12CODE"), cid: "qr" }],
+          attachments: [LOGO_ATTACHMENT, { filename: "sample.png", content: passPng({ id: "sample", token: "SAMPLE12CODE" }, body.images), cid: "qr" }],
         });
         return json({ ok: true });
       }
