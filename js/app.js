@@ -1,7 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js";
-import { analyzeCSV, toCSV } from "./csv.js";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261023.2222";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261023.2222";
 
+const APP_VERSION = "20261023.2222"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -77,7 +78,8 @@ function qrSvg(text) {
 }
 const SDG_COLOURS = ["#E5243B", "#DDA63A", "#4C9F38", "#C5192D", "#FF3A21", "#26BDE2", "#FCC30B", "#A21942", "#FD6925",
   "#DD1367", "#FD9D24", "#BF8B2E", "#3F7E44", "#0A97D9", "#56C02B", "#00689D", "#19486A"];
-// Pass image: SDG strip, QR with logo, then name, pass code and team. Used for downloads and emails.
+// Pass image: SDG strip, QR with logo, then name, pass code and team (PNG download).
+// The email function draws the same layout in supabase/functions/admin/pass.ts.
 async function qrPng(text, name, team) {
   if (!QR_BADGE.complete) await new Promise((r) => { QR_BADGE.onload = QR_BADGE.onerror = r; });
   try { await document.fonts?.load("800 32px 'Plus Jakarta Sans'"); } catch { /* fallback font */ }
@@ -120,12 +122,6 @@ async function qrPng(text, name, team) {
     bar(h - strip);
   }
   return cv.toDataURL("image/png");
-}
-// base64 pass images for the email function, keyed by participant id
-async function passImages(people) {
-  const out = {};
-  for (const p of people) out[p.id] = (await qrPng(p.token, p.name, p.teamName)).split(",")[1];
-  return out;
 }
 
 let audioCtx;
@@ -544,10 +540,9 @@ function showQr(p, team) {
       } catch (e) { toast(e.message, "bad"); btn.disabled = false; btn.textContent = label; }
     };
     const one = $("#qr-mail", m);
-    const teamPeople = team.participants.map((x) => ({ ...x, teamName: team.name }));
-    if (one) one.onclick = async () => send(one, { action: "send_qr", ids: [p.id], images: await passImages([{ ...p, teamName: team.name }]) }, `QR sent to ${p.email}`);
+    if (one) one.onclick = () => send(one, { action: "send_qr", ids: [p.id] }, `QR sent to ${p.email}`);
     const all = $("#qr-team", m);
-    if (all) all.onclick = async () => send(all, { action: "send_team", team_ids: [team.id], images: await passImages(teamPeople) }, `${team.participants.length} QR codes sent to ${leader.email}`);
+    if (all) all.onclick = () => send(all, { action: "send_team", team_ids: [team.id] }, `${team.participants.length} QR codes sent to ${leader.email}`);
   });
 }
 
@@ -559,8 +554,7 @@ async function emailTeam(t, btn) {
   const label = btn?.textContent;
   if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
   try {
-    const images = await passImages(t.participants.map((x) => ({ ...x, teamName: t.name })));
-    const { results } = await callAdmin({ action: "send_team", team_ids: [t.id], images });
+    const { results } = await callAdmin({ action: "send_team", team_ids: [t.id] });
     if (!results[0]?.ok) throw new Error(results[0]?.error || "Failed");
     toast(`${t.participants.length} QR codes sent to ${leader.email}`, "ok");
     route();
@@ -956,8 +950,7 @@ async function viewEmails(main, modeArg) {
   $("#test").onclick = async (e) => {
     e.target.disabled = true;
     try {
-      const images = { sample: (await qrPng("SAMPLE12CODE", state.me.name, "Sample team")).split(",")[1] };
-      await callAdmin({ action: "test_email", to: state.me.email, images });
+      await callAdmin({ action: "test_email", to: state.me.email });
       toast(`Test email sent to ${state.me.email}`, "ok");
     } catch (er) { toast(`Email not working: ${er.message}`, "bad"); }
     e.target.disabled = false;
@@ -991,12 +984,7 @@ async function viewEmails(main, modeArg) {
     for (let i = 0; i < list.length && !mailJob.cancel; i += BATCH) {
       const ids = list.slice(i, i + BATCH).map((x) => x.id);
       try {
-        const chunk = list.slice(i, i + BATCH);
-        const people = mode === "team"
-          ? chunk.flatMap((t) => t.participants.map((x) => ({ ...x, teamName: t.name })))
-          : chunk.map((x) => ({ ...x, teamName: x.team.name }));
-        const images = await passImages(people);
-        const body = mode === "team" ? { action: "send_team", team_ids: ids, images } : { action: "send_qr", ids, images };
+        const body = mode === "team" ? { action: "send_team", team_ids: ids } : { action: "send_qr", ids };
         const { results } = await callAdmin(body);
         results.forEach((r) => (r.ok ? ok++ : bad++));
       } catch (er) {
@@ -1342,5 +1330,19 @@ function viewAccount(main) {
     e.target.reset();
   };
 }
+
+// GitHub Pages lets browsers cache files for 10 minutes. If a newer version is published,
+// reload once with a fresh URL so the new index.html (and its versioned assets) load.
+async function checkVersion() {
+  if (APP_VERSION === "dev") return;
+  try {
+    const { version } = await (await fetch(`version.json?t=${Date.now()}`, { cache: "no-store" })).json();
+    if (version && version !== APP_VERSION && !location.search.includes(`v=${version}`)) {
+      location.replace(`${location.pathname}?v=${version}${location.hash}`);
+    }
+  } catch { /* offline or missing – keep running */ }
+}
+checkVersion();
+setInterval(checkVersion, 5 * 60 * 1000);
 
 boot();

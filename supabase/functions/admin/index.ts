@@ -7,6 +7,9 @@ import QRCode from "npm:qrcode@1.5.4";
 import { PNG } from "npm:pngjs@7.0.0";
 import { Buffer } from "node:buffer";
 import { BADGE_PNG_B64, LOGO_JPG_B64 } from "./logo.ts";
+import { JAKARTA_600, JAKARTA_800, MONO_700 } from "./fonts.ts";
+import { passSvg } from "./pass.ts";
+import { initWasm, Resvg } from "npm:@resvg/resvg-wasm@2.6.2";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -100,19 +103,35 @@ function qrPng(text: string): Buffer {
   return PNG.sync.write(png);
 }
 
-// The admin's browser draws each pass (QR + name + code + team) and sends it as base64 PNG,
-// keyed by participant id. Anything missing or not a sane PNG falls back to the plain logo QR.
-type PassImages = Record<string, string>;
-function passPng(p: { id: number | string; token: string }, images?: PassImages): Buffer {
-  const b64 = images?.[String(p.id)];
-  if (typeof b64 === "string" && b64.length < 1_500_000) {
-    const buf = Buffer.from(b64, "base64");
-    if (buf.length > 100 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return buf;
+// Full pass image (logo QR + name + pass code + team). The SVG renderer loads once per function instance;
+// if it can't load, the plain logo QR is sent instead so emails still go out.
+const RESVG_WASM = "https://cdn.jsdelivr.net/npm/@resvg/resvg-wasm@2.6.2/index_bg.wasm";
+const FONT_BUFFERS = [JAKARTA_800, JAKARTA_600, MONO_700].map((b) => new Uint8Array(Buffer.from(b, "base64")));
+let resvgReady: Promise<boolean> | null = null;
+let selftest: Promise<Record<string, unknown>> | null = null;
+function ensureResvg() {
+  resvgReady ??= initWasm(fetch(RESVG_WASM)).then(() => true, (e) => {
+    console.error("resvg init failed", e);
+    resvgReady = null;
+    return false;
+  });
+  return resvgReady;
+}
+async function passPng(token: string, name: string, team: string): Promise<Buffer> {
+  const qr = qrPng(token);
+  if (!(await ensureResvg())) return qr;
+  try {
+    const svg = passSvg(qr.toString("base64"), qr.readUInt32BE(16), name, token, team);
+    const png = new Resvg(svg, { font: { fontBuffers: FONT_BUFFERS, loadSystemFonts: false, defaultFontFamily: "Plus Jakarta Sans" } })
+      .render().asPng();
+    return Buffer.from(png);
+  } catch (e) {
+    console.error("pass render failed", e);
+    return qr;
   }
-  return qrPng(p.token);
 }
 
-async function sendQr(ids: number[], images?: PassImages) {
+async function sendQr(ids: number[]) {
   const s = await getSettings();
   const event = s.event_name || "Hackathon";
   const { data: people, error } = await db
@@ -130,7 +149,7 @@ async function sendQr(ids: number[], images?: PassImages) {
     try {
       const team = (p as any).teams?.name ?? "";
       const vars = { name: p.name, team, event, code: p.token };
-      const png = passPng(p, images);
+      const png = await passPng(p.token, p.name, team);
       const message = esc(fill(s.email_message || "", vars)).replace(/\n/g, "<br>");
       const html = shell(event, `
         <p style="font-size:15px;line-height:1.55">${message}</p>
@@ -164,7 +183,7 @@ async function sendQr(ids: number[], images?: PassImages) {
 
 // One email per team to the leader (cc any other member with an email) carrying every member's QR.
 // Used when the registration form only collected the leader's email.
-async function sendTeams(teamIds: number[], images?: PassImages) {
+async function sendTeams(teamIds: number[]) {
   const s = await getSettings();
   const event = s.event_name || "Hackathon";
   const { data: teams, error } = await db
@@ -189,7 +208,7 @@ async function sendTeams(teamIds: number[], images?: PassImages) {
       const attachments: { filename: string; content: Uint8Array; cid?: string }[] = [LOGO_ATTACHMENT];
       const blocks: string[] = [];
       for (const [i, m] of members.entries()) {
-        const png = passPng(m, images);
+        const png = await passPng(m.token, m.name, t.name);
         attachments.push({ filename: `qr${i}.png`, content: png, cid: `qr${i}` });
         attachments.push({ filename: `${m.name.replace(/[^\w]+/g, "_")}_QR.png`, content: png });
         blocks.push(`<td style="text-align:center;padding:10px;vertical-align:top;width:50%">
@@ -258,6 +277,14 @@ async function mailCredentials(name: string, email: string, role: string, passwo
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  // Unauthenticated health check: renders one sample pass (no data involved), cached per instance.
+  if (new URL(req.url).searchParams.has("selftest")) {
+    selftest ??= passPng("SAMPLE12CODE", "Sample Name", "Sample team").then(async (png) => ({
+      renderer: (await ensureResvg()) && png.readUInt32BE(20) > png.readUInt32BE(16) ? "full pass" : "plain QR fallback",
+      width: png.readUInt32BE(16), height: png.readUInt32BE(20), bytes: png.length,
+    }));
+    return json(await selftest);
+  }
   try {
     const jwt = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
     const { data: auth } = await db.auth.getUser(jwt);
@@ -270,12 +297,12 @@ Deno.serve(async (req) => {
     switch (body.action) {
       case "send_qr": {
         const ids = (body.ids ?? []).slice(0, 25).map(Number);
-        return json({ results: await sendQr(ids, body.images) });
+        return json({ results: await sendQr(ids) });
       }
 
       case "send_team": {
         const ids = (body.team_ids ?? []).slice(0, 5).map(Number);
-        return json({ results: await sendTeams(ids, body.images) });
+        return json({ results: await sendTeams(ids) });
       }
 
       case "test_email": {
@@ -287,7 +314,7 @@ Deno.serve(async (req) => {
           html: shell(s.event_name || "Event", `<p style="text-align:center">Email sending is working ✅</p>
             <div style="text-align:center"><img src="cid:qr" width="240" alt="Sample QR pass" style="width:240px;max-width:100%;height:auto;border:1px solid #e5e7eb;border-radius:12px">
             <div style="font-size:12px;color:#6b7280">Sample QR – this is how passes will look</div></div>`),
-          attachments: [LOGO_ATTACHMENT, { filename: "sample.png", content: passPng({ id: "sample", token: "SAMPLE12CODE" }, body.images), cid: "qr" }],
+          attachments: [LOGO_ATTACHMENT, { filename: "sample.png", content: await passPng("SAMPLE12CODE", me.name || "Your Name", "Sample team"), cid: "qr" }],
         });
         return json({ ok: true });
       }

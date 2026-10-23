@@ -82,6 +82,14 @@ The camera scanner needs **https**, which GitHub Pages provides.
 6. **Judge.** Mentors scan any team member's QR, enter scores and comments, and save. They can edit their own scores later.
 7. **Results.** The leaderboard shows each team's average across judges and per-criterion averages. You can export scores and attendance as CSV.
 
+## Publishing changes
+Run `npm run bump` before each commit that changes the site. It stamps a new version on the CSS and JS URLs and writes `version.json`. Open portals check that file and reload themselves, so no one keeps using a cached old version. GitHub Pages lets browsers cache files for 10 minutes.
+
+Check the email function's pass renderer:
+```bash
+curl "https://kokdabbyzhdlwhwfxopf.supabase.co/functions/v1/admin?selftest"
+```
+
 ## Local preview
 ```bash
 npm run dev

@@ -4,6 +4,7 @@
   "type": "module",
   "description": "QR passes, check-in scanning and judging for HACK4SDG (static site + Supabase)",
   "scripts": {
-    "dev": "npx --yes http-server -p 5173 -c-1"
+    "dev": "npx --yes http-server -p 5173 -c-1",
+    "bump": "node scripts/bump-version.mjs"
   }
 }
