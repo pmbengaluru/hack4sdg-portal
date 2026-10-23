@@ -284,6 +284,34 @@ tr:last-child td { border-bottom: 0; }
 .team-pick button { text-align: left; }
 #tot { display: inline-block; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; font-size: 1.6rem; }
 
+/* ---------- judging donut */
+.donut-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-top: 10px; }
+.donut-panel { border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; background: var(--panel-solid); }
+.donut-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.donut-body { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.donut { position: relative; width: 168px; height: 168px; flex: none; }
+.donut svg { width: 100%; height: 100%; overflow: visible; }
+.donut-seg { fill: none; stroke-width: 20; cursor: pointer; outline: none;
+  transition: stroke-dasharray 1s var(--ease), opacity .2s, stroke-width .2s var(--ease); }
+.donut-seg.done { stroke: var(--ok); }
+.donut-seg.left { stroke: rgba(100, 112, 138, .28); }
+.donut.hovering .donut-seg:not(.hot) { opacity: .45; }
+.donut-seg.hot, .donut-seg:focus-visible { stroke-width: 24; }
+.donut-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
+.donut-num { font-size: 1.9rem; font-weight: 800; letter-spacing: -.03em; color: var(--ink); line-height: 1; }
+.donut-sub { font-size: .8rem; color: var(--muted); margin-top: 4px; }
+.donut-legend { flex: 1; min-width: 150px; }
+.lg-row { display: grid; grid-template-columns: 12px 1fr auto 42px; align-items: center; gap: 8px; padding: 5px 0; font-size: .9rem; }
+.lg-row b { font-variant-numeric: tabular-nums; }
+.lg-row .muted { text-align: right; font-variant-numeric: tabular-nums; }
+.sw { width: 12px; height: 12px; border-radius: 4px; }
+.sw.done { background: var(--ok); }
+.sw.left { background: rgba(100, 112, 138, .28); }
+.waiting { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; max-height: 140px; overflow: auto; }
+.viz-tip { position: fixed; z-index: 70; pointer-events: none; background: var(--navy); color: #fff; font-size: .82rem; font-weight: 600;
+  padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, .16); box-shadow: var(--shadow-lg); opacity: 0; transform: translateY(4px); transition: opacity .15s, transform .15s; }
+.viz-tip.on { opacity: 1; transform: none; }
+
 /* ---------- modal + toast */
 .modal-bg { position: fixed; inset: 0; background: rgba(11, 16, 34, .45); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); display: grid; place-items: center; z-index: 50; padding: 16px; animation: fade .25s ease; }
 .modal { background: var(--panel-solid); border: 1px solid var(--line); border-radius: 22px; max-width: 540px; width: 100%; max-height: 90vh; overflow: auto; padding: 24px; box-shadow: var(--shadow-lg); animation: modal-in .4s var(--ease); }

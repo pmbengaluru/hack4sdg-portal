@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261023.2222";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261023.2222";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261023.2233";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261023.2233";
 
-const APP_VERSION = "20261023.2222"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261023.2233"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -283,6 +283,7 @@ async function route() {
   }
   $$(".nav a, .mnav a").forEach((a) => a.classList.toggle("active", a.dataset.r === name));
   $(".mnav a.active")?.scrollIntoView({ inline: "center", block: "nearest", behavior: reduceMotion() ? "auto" : "smooth" });
+  $("#viz-tip")?.classList.remove("on");
   const main = $("#main");
   main.classList.remove("page-in");
   main.innerHTML = SKELETON;
@@ -382,9 +383,10 @@ async function viewDashboard(main) {
     sb.from("staff").select("role").then(must),
     sb.from("scans").select("checkpoint_id").then(must),
     sb.from("scores").select("checkpoint_id,team_id").then(must),
-    sb.from("teams").select("id", { count: "exact", head: true }),
+    sb.from("teams").select("id,name").order("name").then(must),
   ]);
   const count = (arr, f) => arr.filter(f).length;
+  const judgingCps = cps.filter((c) => c.type === "judging");
   const stat = (v, l) => `<div class="stat"><div class="v">${v}</div><div class="l">${l}</div></div>`;
   const cpRows = cps.map((c) => {
     if (c.type === "scan") {
@@ -395,22 +397,28 @@ async function viewDashboard(main) {
         <td style="min-width:160px"><div class="progress"><div style="width:${pct}%"></div></div><span class="small muted">${n} / ${parts.length} people</span></td></tr>`;
     }
     const n = new Set(scores.filter((s) => s.checkpoint_id === c.id).map((s) => s.team_id)).size;
-    const pct = teams.count ? Math.round((n / teams.count) * 100) : 0;
+    const pct = teams.length ? Math.round((n / teams.length) * 100) : 0;
     return `<tr><td><b>${esc(c.name)}</b>${cpWindow(c) ? `<br><span class="small muted">${esc(cpWindow(c))}</span> ${cpTimeBadge(c)}` : ""}</td><td><span class="badge warn">Judging</span></td>
       <td>${c.active ? '<span class="badge ok">Open</span>' : '<span class="badge">Closed</span>'}</td>
-      <td><div class="progress"><div style="width:${pct}%"></div></div><span class="small muted">${n} / ${teams.count} teams graded</span></td></tr>`;
+      <td><div class="progress"><div style="width:${pct}%"></div></div><span class="small muted">${n} / ${teams.length} teams graded</span></td></tr>`;
   }).join("");
 
   main.innerHTML = `
     <div class="page-head"><div><h1>Dashboard</h1><p class="muted">${esc(state.settings.event_name)} at a glance</p></div>
       <div class="row"><a class="btn" href="#/import">Import CSV</a><a class="btn primary" href="#/emails">Send QR emails</a></div></div>
     <div class="grid stats" style="margin-bottom:16px">
-      ${stat(teams.count ?? 0, "Teams")}
+      ${stat(teams.length, "Teams")}
       ${stat(parts.length, "Participants")}
       ${stat(count(parts, (p) => p.email_status === "sent"), "QR emails sent")}
       ${stat(count(parts, (p) => p.email_status === "failed"), "Emails failed")}
       ${stat(count(staff, (s) => s.role === "volunteer"), "Volunteers")}
       ${stat(count(staff, (s) => s.role === "mentor"), "Mentors / judges")}
+    </div>
+    <div class="card"><div class="row" style="justify-content:space-between;margin-bottom:4px"><h2>Judging progress</h2>
+      <a class="btn sm" href="#/results">Results</a></div>
+      ${judgingCps.length && teams.length
+        ? `<div class="donut-grid">${judgingCps.map((c) => judgingDonut(c, teams, scores)).join("")}</div>`
+        : `<div class="empty">${teams.length ? 'No judging rounds yet. <a href="#/checkpoints">Add a judging checkpoint</a> to track it here.' : "Import teams to see judging progress."}</div>`}
     </div>
     <div class="card"><div class="row" style="justify-content:space-between;margin-bottom:8px"><h2>Checkpoints</h2>
       <a class="btn sm" href="#/checkpoints">Manage</a></div>
@@ -418,6 +426,78 @@ async function viewDashboard(main) {
         : `<div class="empty">No checkpoints yet. <a href="#/checkpoints">Create check-in, meals, judging rounds…</a></div>`}
     </div>
     ${!parts.length ? `<div class="notice info">Start by importing the registration CSV under <a href="#/import">Import CSV</a>.</div>` : ""}`;
+  mountDonuts(main);
+}
+
+// Donut: teams judged vs not judged yet in one judging round (2-part share, so a donut reads fine).
+const DONUT_R = 62, DONUT_C = 2 * Math.PI * DONUT_R, DONUT_GAP = 3;
+function judgingDonut(cp, teams, scores) {
+  const mine = scores.filter((s) => s.checkpoint_id === cp.id);
+  const judged = new Set(mine.map((s) => s.team_id));
+  const total = teams.length, done = teams.filter((t) => judged.has(t.id)).length, left = total - done;
+  const pct = (n) => (total ? Math.round((n / total) * 100) : 0);
+  const waiting = teams.filter((t) => !judged.has(t.id));
+  const avgJudges = done ? (mine.length / done).toFixed(1) : "0";
+  // arcs in circumference units; a small surface gap separates the two parts when both exist
+  const gap = done && left ? DONUT_GAP : 0;
+  const doneLen = Math.max(0, (done / total) * DONUT_C - gap);
+  const leftLen = Math.max(0, (left / total) * DONUT_C - gap);
+  const seg = (cls, len, offset, tip) => len > 0
+    ? `<circle class="donut-seg ${cls}" r="${DONUT_R}" cx="80" cy="80" data-dash="${len.toFixed(2)}" stroke-dasharray="0 ${DONUT_C.toFixed(2)}"
+        stroke-dashoffset="${(-offset).toFixed(2)}" tabindex="0" data-tip="${esc(tip)}" aria-label="${esc(tip)}"></circle>` : "";
+  return `<div class="donut-panel">
+    <div class="donut-title"><b>${esc(cp.name)}</b> ${cp.active ? '<span class="badge ok">Open</span>' : '<span class="badge">Closed</span>'}</div>
+    <div class="donut-body">
+      <div class="donut" role="img" aria-label="${esc(cp.name)}: ${done} of ${total} teams judged">
+        <svg viewBox="0 0 160 160">
+          <g transform="rotate(-90 80 80)">
+            ${seg("done", doneLen, gap / 2, `Judged: ${done} team${done === 1 ? "" : "s"} (${pct(done)}%)`)}
+            ${seg("left", leftLen, doneLen + gap * 1.5, `Not judged yet: ${left} team${left === 1 ? "" : "s"} (${pct(left)}%)`)}
+          </g>
+        </svg>
+        <div class="donut-center"><span class="donut-num">${pct(done)}%</span><span class="donut-sub">${done} / ${total} teams</span></div>
+      </div>
+      <div class="donut-legend">
+        <div class="lg-row"><i class="sw done"></i><span>Judged</span><b>${done}</b><span class="muted">${pct(done)}%</span></div>
+        <div class="lg-row"><i class="sw left"></i><span>Not judged yet</span><b>${left}</b><span class="muted">${pct(left)}%</span></div>
+        <div class="small muted" style="margin-top:6px">${mine.length} score${mine.length === 1 ? "" : "s"} · avg ${avgJudges} judge${avgJudges === "1.0" ? "" : "s"} per judged team</div>
+      </div>
+    </div>
+    ${waiting.length && done ? `<details class="small" style="margin-top:8px"><summary>Teams still waiting (${waiting.length})</summary>
+      <div class="waiting">${waiting.map((t) => `<span class="badge">${esc(t.name)}</span>`).join(" ")}</div></details>` : ""}
+  </div>`;
+}
+
+// Animate arcs in and attach the hover tooltip.
+function mountDonuts(root) {
+  const segs = root.querySelectorAll(".donut-seg");
+  if (!segs.length) return;
+  requestAnimationFrame(() => requestAnimationFrame(() => segs.forEach((c) =>
+    c.setAttribute("stroke-dasharray", `${c.dataset.dash} ${DONUT_C.toFixed(2)}`))));
+  let tip = $("#viz-tip");
+  if (!tip) {
+    tip = Object.assign(document.createElement("div"), { id: "viz-tip", className: "viz-tip" });
+    document.body.appendChild(tip);
+  }
+  const show = (c, x, y) => {
+    tip.textContent = c.dataset.tip;
+    tip.style.left = `${x + 14}px`;
+    tip.style.top = `${y + 14}px`;
+    tip.classList.add("on");
+    c.closest(".donut").classList.add("hovering");
+    c.classList.add("hot");
+  };
+  const hide = (c) => {
+    tip.classList.remove("on");
+    c.closest(".donut")?.classList.remove("hovering");
+    c.classList.remove("hot");
+  };
+  segs.forEach((c) => {
+    c.addEventListener("pointermove", (e) => show(c, e.clientX, e.clientY));
+    c.addEventListener("pointerleave", () => hide(c));
+    c.addEventListener("focus", () => { const r = c.getBoundingClientRect(); show(c, r.left + r.width / 2, r.top + r.height / 2); });
+    c.addEventListener("blur", () => hide(c));
+  });
 }
 
 // ------------------------------------------------------------------ import
