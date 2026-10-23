@@ -16,8 +16,10 @@ create table if not exists public.teams (
   id            bigint generated always as identity primary key,
   name          text not null,
   declared_size int,
+  college       text,
   created_at    timestamptz not null default now()
 );
+alter table public.teams add column if not exists college text;
 create unique index if not exists teams_name_key on public.teams (lower(name));
 
 create table if not exists public.participants (
@@ -82,8 +84,8 @@ insert into public.settings (key, value) values
   ('email_subject', 'Your {{event}} entry pass – {{name}}'),
   ('email_message', 'Hi {{name}},
 
-You are registered for {{event}} as part of team "{{team}}".
-Please keep the QR code below handy – it will be scanned at check-in and other checkpoints during the event.
+Your team "{{team}}" is registered for {{event}}.
+The entry QR codes are below – they will be scanned at check-in and at other checkpoints during the event, so every member should keep their own QR handy on their phone.
 
 See you there!')
 on conflict (key) do nothing;
@@ -205,7 +207,7 @@ end $$;
 
 -- ---------------------------------------------------------------
 -- RPC: import teams from parsed CSV (one transaction)
--- p_data = [{"name":"Team A","size":4,"members":[{"name":"..","email":"..","phone":"..","leader":true}]}]
+-- p_data = [{"name":"Team A","size":4,"college":"..","members":[{"name":"..","email":"..","phone":"..","leader":true}]}]
 -- ---------------------------------------------------------------
 create or replace function public.import_teams(p_data jsonb, p_replace boolean default false)
 returns jsonb language plpgsql security definer set search_path = public as $$
@@ -223,11 +225,14 @@ begin
   for tj in select * from jsonb_array_elements(p_data) loop
     select id into v_team_id from public.teams where lower(name) = lower(trim(tj->>'name'));
     if v_team_id is null then
-      insert into public.teams (name, declared_size) values (trim(tj->>'name'), nullif(tj->>'size','')::int)
+      insert into public.teams (name, declared_size, college)
+      values (trim(tj->>'name'), nullif(tj->>'size','')::int, nullif(trim(tj->>'college'),''))
       returning id into v_team_id;
       teams_new := teams_new + 1;
     else
-      update public.teams set declared_size = coalesce(nullif(tj->>'size','')::int, declared_size) where id = v_team_id;
+      update public.teams set declared_size = coalesce(nullif(tj->>'size','')::int, declared_size),
+                              college = coalesce(nullif(trim(tj->>'college'),''), college)
+       where id = v_team_id;
       teams_upd := teams_upd + 1;
     end if;
 

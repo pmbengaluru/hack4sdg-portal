@@ -98,6 +98,20 @@ function beep(ok = true) {
   } catch { /* audio not available */ }
 }
 
+let sheetJs;
+async function readSpreadsheet(file) {
+  if (!/\.(xlsx|xls|ods)$/i.test(file.name)) return file.text();
+  sheetJs ??= new Promise((ok, fail) => {
+    const s = Object.assign(document.createElement("script"), { src: "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" });
+    s.onload = () => ok(window.XLSX);
+    s.onerror = () => fail(new Error("Couldn't load the Excel reader – check your connection or upload a CSV."));
+    document.head.appendChild(s);
+  });
+  const XLSX = await sheetJs;
+  const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+  return XLSX.utils.sheet_to_csv(wb.Sheets[wb.SheetNames[0]], { blankrows: true });
+}
+
 async function callAdmin(body) {
   const { data, error } = await sb.functions.invoke("admin", { body });
   if (error) {
@@ -117,7 +131,7 @@ async function loadSettings() {
 }
 const getCheckpoints = async () => must(await sb.from("checkpoints").select("*").order("sort_order").order("id"));
 const getTeams = async () =>
-  must(await sb.from("teams").select("id,name,declared_size,participants(id,name,email,phone,is_leader,token,email_status,email_sent_at,email_error)").order("name"));
+  must(await sb.from("teams").select("id,name,declared_size,college,participants(id,name,email,phone,is_leader,token,email_status,email_sent_at,email_error)").order("name"));
 const getParticipants = async () =>
   must(await sb.from("participants").select("id,name,email,phone,token,email_status,email_error,team_id,teams(name)").order("name"));
 
@@ -272,12 +286,14 @@ function viewImport(main) {
     <div class="page-head"><div><h1>Import participants</h1>
       <p class="muted">Upload the registration CSV. Members are grouped under their team automatically and each person gets a unique QR code.</p></div></div>
     <div class="card">
-      <div class="dropzone" id="drop"><b>Drop CSV here</b> or click to choose a file<br>
-        <span class="small muted">Export from Google Forms / Sheets as .csv</span>
-        <input type="file" id="file" accept=".csv,text/csv" hidden></div>
+      <div class="dropzone" id="drop"><b>Drop the registration sheet here</b> or click to choose a file<br>
+        <span class="small muted">Excel (.xlsx) or CSV – e.g. the Google Form responses download</span>
+        <input type="file" id="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden></div>
       <details style="margin-top:14px"><summary class="small"><b>Which CSV layouts work?</b></summary>
         <div class="small muted" style="margin-top:8px">
-          <p><b>One row per team</b> (typical Google Form): <code>Team Name, Team Size, Team Leader Name, Team Leader Email, Member 2 Name, Member 2 Email, Member 3 Name, …</code></p>
+          <p><b>One row per team</b> (typical Google Form): <code>Team Name, Team Size, Team Leader Name, Team Leader Email, Team Member Name 2, Team Member 2 Phone Number, …</code>.
+          Forms that branch by team size (repeated columns like "Team Member Name 2 3") are handled, and "Member 1 (Leader)" is merged with the leader.
+          If a team submitted twice, the latest row is used.</p>
           <p><b>One row per person</b>: <code>Team Name, Name, Email, Phone, Role</code> (Role "Leader" marks the leader)</p>
           <p>Column names are matched loosely ("Member 1 Mail ID", "2nd member name", "Email Address" all work). Extra columns are ignored.
           Re-importing updates existing people (matched by email) and keeps their QR codes.</p>
@@ -303,9 +319,8 @@ function viewImport(main) {
   ]));
 
   async function handle(f) {
-    const text = await f.text();
     let res;
-    try { res = analyzeCSV(text); } catch (e) {
+    try { res = analyzeCSV(await readSpreadsheet(f)); } catch (e) {
       $("#preview").innerHTML = `<div class="card"><div class="notice">${esc(e.message)}</div></div>`;
       return;
     }
@@ -317,15 +332,17 @@ function viewImport(main) {
         <div class="grid stats" style="margin:12px 0">
           <div class="stat"><div class="v">${res.teams.length}</div><div class="l">Teams</div></div>
           <div class="stat"><div class="v">${res.memberCount}</div><div class="l">Participants</div></div>
-          <div class="stat"><div class="v">${res.teams.filter((t) => t.members.some((m) => !m.email)).length}</div><div class="l">Teams w/ missing emails</div></div>
+          <div class="stat"><div class="v">${res.teams.filter((t) => t.members.some((m) => m.email)).length}</div><div class="l">Teams with an email</div></div>
         </div>
+        ${res.teams.some((t) => t.members.some((m) => !m.email)) ? `<div class="notice info">${res.teams.flatMap((t) => t.members).filter((m) => !m.email).length} people have no email of their own –
+          their QR codes are emailed to their <b>team leader</b> (one email per team with every member's QR).</div>` : ""}
         <p class="small muted">Detected layout: <b>${res.mode === "wide" ? "one row per team" : "one row per person"}</b> ·
           Team sizes: ${Object.entries(sizes).map(([k, v]) => `${v} team(s) of ${k}`).join(", ")}</p>
         ${res.warnings.length ? `<div class="notice"><b>${res.warnings.length} warning(s)</b><ul class="warnings">${res.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
         <div class="table-wrap" style="max-height:380px;overflow:auto;border:1px solid var(--line);border-radius:8px">
           <table><thead><tr><th>Team</th><th>Size</th><th>Members</th></tr></thead><tbody>
-          ${res.teams.map((t) => `<tr><td><b>${esc(t.name)}</b></td><td>${t.members.length}${t.size && t.size !== t.members.length ? ` <span class="badge warn">says ${t.size}</span>` : ""}</td>
-            <td>${t.members.map((m) => `${esc(m.name)}${m.leader ? ' <span class="badge brand">Lead</span>' : ""} <span class="muted small">${esc(m.email || "no email")}</span>`).join("<br>")}</td></tr>`).join("")}
+          ${res.teams.map((t) => `<tr><td><b>${esc(t.name)}</b>${t.college ? `<br><span class="small muted">${esc(t.college)}</span>` : ""}</td><td>${t.members.length}${t.size && t.size !== t.members.length ? ` <span class="badge warn">says ${t.size}</span>` : ""}</td>
+            <td>${t.members.map((m) => `${esc(m.name)}${m.leader ? ' <span class="badge brand">Lead</span>' : ""} <span class="muted small">${esc(m.email || m.phone || "")}</span>`).join("<br>")}</td></tr>`).join("")}
           </tbody></table></div>
         <div style="margin-top:16px">
           <label class="check"><input type="radio" name="mode" value="merge" checked> Add / update (keeps existing teams, scans and QR codes)</label>
@@ -352,35 +369,40 @@ function viewImport(main) {
 
 // ------------------------------------------------------------------ teams
 function emailBadge(p) {
-  if (!p.email) return '<span class="badge bad">No email</span>';
-  if (p.email_status === "sent") return `<span class="badge ok" title="${esc(fmtTime(p.email_sent_at))}">Mailed</span>`;
-  if (p.email_status === "failed") return `<span class="badge bad" title="${esc(p.email_error)}">Mail failed</span>`;
-  return '<span class="badge">Not mailed</span>';
+  const via = p.email ? "" : ' <span class="badge info" title="No own email – QR goes to the team leader">via leader</span>';
+  if (p.email_status === "sent") return `<span class="badge ok" title="${esc(fmtTime(p.email_sent_at))}">Mailed</span>${via}`;
+  if (p.email_status === "failed") return `<span class="badge bad" title="${esc(p.email_error)}">Mail failed</span>${via}`;
+  return `<span class="badge">Not mailed</span>${via}`;
 }
-
-function showQr(p, teamName) {
+function showQr(p, team) {
+  const leader = team.participants.find((x) => x.is_leader && x.email) || team.participants.find((x) => x.email);
   modal(`
-    <h2>${esc(p.name)}</h2><p class="muted small" style="margin:0 0 12px">${esc(teamName)} · ${esc(p.email || "no email")}</p>
+    <h2>${esc(p.name)}</h2><p class="muted small" style="margin:0 0 12px">${esc(team.name)} · ${esc(p.email || p.phone || "")}</p>
     <div class="qr-box">${qrSvg(p.token)}</div>
     <p style="text-align:center">Pass code <span class="code">${esc(p.token)}</span></p>
     <div class="actions">
       <button class="btn" data-close>Close</button>
       <button class="btn" id="qr-dl">Download PNG</button>
-      ${p.email ? `<button class="btn primary" id="qr-mail">${p.email_status === "sent" ? "Resend" : "Send"} email</button>` : ""}
+      ${p.email && p.email !== leader?.email ? `<button class="btn" id="qr-mail">Email only ${esc(p.name.split(" ")[0])}</button>` : ""}
+      ${leader ? `<button class="btn primary" id="qr-team" title="One email to ${esc(leader.email)} with all ${team.participants.length} QR codes">Email team's QRs to leader</button>` : ""}
     </div>`, (m, close) => {
     $("#qr-dl", m).onclick = () => {
-      const a = Object.assign(document.createElement("a"), { href: qrPng(p.token, p.name, teamName), download: `${p.name.replace(/\W+/g, "_")}_QR.png` });
+      const a = Object.assign(document.createElement("a"), { href: qrPng(p.token, p.name, team.name), download: `${p.name.replace(/\W+/g, "_")}_QR.png` });
       a.click();
     };
-    const mail = $("#qr-mail", m);
-    if (mail) mail.onclick = async () => {
-      mail.disabled = true; mail.textContent = "Sending…";
+    const send = async (btn, body, done) => {
+      const label = btn.textContent;
+      btn.disabled = true; btn.textContent = "Sending…";
       try {
-        const { results } = await callAdmin({ action: "send_qr", ids: [p.id] });
-        if (results[0]?.ok) { toast(`QR sent to ${p.email}`, "ok"); close(); route(); }
+        const { results } = await callAdmin(body);
+        if (results[0]?.ok) { toast(done, "ok"); close(); route(); }
         else throw new Error(results[0]?.error || "Failed");
-      } catch (e) { toast(e.message, "bad"); mail.disabled = false; mail.textContent = "Retry"; }
+      } catch (e) { toast(e.message, "bad"); btn.disabled = false; btn.textContent = label; }
     };
+    const one = $("#qr-mail", m);
+    if (one) one.onclick = () => send(one, { action: "send_qr", ids: [p.id] }, `QR sent to ${p.email}`);
+    const all = $("#qr-team", m);
+    if (all) all.onclick = () => send(all, { action: "send_team", team_ids: [team.id] }, `${team.participants.length} QR codes sent to ${leader.email}`);
   });
 }
 
@@ -431,7 +453,7 @@ async function viewTeams(main) {
     <div class="page-head"><div><h1>Teams & QR codes</h1><p class="muted">${teams.length} teams · ${total} participants</p></div>
       <div class="row"><button class="btn" id="add-team">+ Team</button><button class="btn" id="add-p" ${teams.length ? "" : "disabled"}>+ Participant</button>
       <button class="btn" id="exp">Export CSV</button><a class="btn" href="#/print">Print badges</a></div></div>
-    <div class="row" style="margin-bottom:14px"><input class="grow" id="q" placeholder="Search team, name, email or code…">
+    <div class="row" style="margin-bottom:14px"><input class="grow" id="q" placeholder="Search team, college, name, email, phone or code…">
       <select id="filter" style="width:auto"><option value="">All</option><option value="pending">Not mailed</option><option value="sent">Mailed</option><option value="failed">Mail failed</option><option value="noemail">No email</option></select></div>
     <div id="list"></div>`;
 
@@ -439,15 +461,15 @@ async function viewTeams(main) {
     const q = $("#q").value.trim().toLowerCase(), fl = $("#filter").value;
     const match = (p) => (!fl || (fl === "noemail" ? !p.email : p.email && p.email_status === fl));
     const rows = teams.map((t) => {
-      const teamHit = !q || t.name.toLowerCase().includes(q);
-      const ms = t.participants.filter((p) => match(p) && (teamHit || [p.name, p.email, p.token].some((v) => (v || "").toLowerCase().includes(q))));
+      const teamHit = !q || `${t.name} ${t.college || ""}`.toLowerCase().includes(q);
+      const ms = t.participants.filter((p) => match(p) && (teamHit || [p.name, p.email, p.phone, p.token].some((v) => (v || "").toLowerCase().includes(q))));
       return { t, ms };
     }).filter((x) => x.ms.length || (!fl && (!q || x.t.name.toLowerCase().includes(q))));
     $("#list").innerHTML = rows.length ? rows.map(({ t, ms }) => {
       const sent = t.participants.filter((p) => p.email_status === "sent").length;
       const sorted = [...ms].sort((a, b) => b.is_leader - a.is_leader || a.name.localeCompare(b.name));
       return `<details class="team" ${q || fl ? "open" : ""}>
-        <summary><span class="name">${esc(t.name)}</span>
+        <summary><span class="name">${esc(t.name)}${t.college ? ` <span class="small muted" style="font-weight:400">· ${esc(t.college)}</span>` : ""}</span>
           <span class="badge">${t.participants.length} member${t.participants.length === 1 ? "" : "s"}</span>
           ${t.declared_size && t.declared_size !== t.participants.length ? `<span class="badge warn">size ${t.declared_size}</span>` : ""}
           <span class="badge ${sent === t.participants.length && sent ? "ok" : ""}">${sent}/${t.participants.length} mailed</span>
@@ -470,7 +492,7 @@ async function viewTeams(main) {
     const b = e.target.closest("button");
     if (!b) return;
     e.preventDefault();
-    if (b.dataset.qr) { const [p, t] = findP(Number(b.dataset.qr)); showQr(p, t.name); }
+    if (b.dataset.qr) { const [p, t] = findP(Number(b.dataset.qr)); showQr(p, t); }
     if (b.dataset.edit) { const [p, t] = findP(Number(b.dataset.edit)); editParticipant({ ...p, team_id: t.id }, teams); }
     if (b.dataset.teamEdit) {
       const t = teams.find((x) => x.id === Number(b.dataset.teamEdit));
@@ -696,37 +718,62 @@ async function viewStaff(main) {
 // ------------------------------------------------------------------ emails
 const mailJob = { running: false, cancel: false };
 
-async function viewEmails(main) {
-  const parts = await getParticipants();
-  const withEmail = parts.filter((p) => p.email);
-  const pending = withEmail.filter((p) => p.email_status === "pending");
-  const failed = withEmail.filter((p) => p.email_status === "failed");
-  const sent = withEmail.filter((p) => p.email_status === "sent");
+async function viewEmails(main, modeArg) {
+  const teams = await getTeams();
+  const mode = modeArg === "person" ? "person" : "team";
+  const people = teams.flatMap((t) => t.participants.map((p) => ({ ...p, team: t })));
+  const noOwnEmail = people.filter((p) => !p.email).length;
+
+  // team mode: one email per team to the leader with every member's QR
+  const teamStatus = (t) => {
+    if (!t.participants.some((p) => p.email)) return "noemail";
+    if (t.participants.some((p) => p.email_status === "failed")) return "failed";
+    return t.participants.every((p) => p.email_status === "sent") ? "sent" : "pending";
+  };
+  const leaderOf = (t) => t.participants.find((p) => p.is_leader && p.email) || t.participants.find((p) => p.email);
+  const byStatus = (st) => teams.filter((t) => teamStatus(t) === st);
+  const personList = (st) => people.filter((p) => p.email && (st === "all" || p.email_status === st));
+  const lists = mode === "team"
+    ? { pending: byStatus("pending"), failed: byStatus("failed"), all: teams.filter((t) => teamStatus(t) !== "noemail") }
+    : { pending: personList("pending"), failed: personList("failed"), all: personList("all") };
+  const unit = mode === "team" ? "team" : "person";
+  const plural = (n) => `${n} ${unit === "team" ? (n === 1 ? "team" : "teams") : (n === 1 ? "person" : "people")}`;
+  const peopleIn = (list) => (mode === "team" ? list.reduce((n, t) => n + t.participants.length, 0) : list.length);
+  const failedRows = mode === "team"
+    ? byStatus("failed").map((t) => [t.name, leaderOf(t)?.email, t.participants.find((p) => p.email_error)?.email_error])
+    : personList("failed").map((p) => [`${p.name} (${p.team.name})`, p.email, p.email_error]);
+  const noEmailTeams = byStatus("noemail");
+
   main.innerHTML = `
-    <div class="page-head"><div><h1>Send QR emails</h1><p class="muted">Each participant gets their own QR code by email (inline image + attachment).</p></div></div>
+    <div class="page-head"><div><h1>Send QR emails</h1>
+      <p class="muted">${mode === "team"
+        ? "One email per team to the team leader, containing every member's QR code (inline + attached). Other members with an email are cc'd."
+        : "One email per person, only for people who have their own email address."}</p></div>
+      <div class="row"><a class="btn ${mode === "team" ? "primary" : ""}" href="#/emails/team">Per team</a><a class="btn ${mode === "person" ? "primary" : ""}" href="#/emails/person">Per person</a></div></div>
     <div class="grid stats" style="margin-bottom:16px">
-      <div class="stat"><div class="v">${sent.length}</div><div class="l">Sent</div></div>
-      <div class="stat"><div class="v">${pending.length}</div><div class="l">Not sent yet</div></div>
-      <div class="stat"><div class="v">${failed.length}</div><div class="l">Failed</div></div>
-      <div class="stat"><div class="v">${parts.length - withEmail.length}</div><div class="l">No email address</div></div>
+      <div class="stat"><div class="v">${people.filter((p) => p.email_status === "sent").length}</div><div class="l">People whose QR was mailed</div></div>
+      <div class="stat"><div class="v">${plural(lists.pending.length)}</div><div class="l">Not mailed yet</div></div>
+      <div class="stat"><div class="v">${plural(lists.failed.length)}</div><div class="l">Failed</div></div>
+      <div class="stat"><div class="v">${noOwnEmail}</div><div class="l">People without own email${mode === "team" ? " (sent via leader)" : " (skipped)"}</div></div>
     </div>
+    ${mode === "person" && noOwnEmail ? `<div class="notice">${noOwnEmail} people have no email of their own and are skipped in this mode. Use <a href="#/emails/team">Per team</a> to send their QR codes to their team leader.</div>` : ""}
+    ${noEmailTeams.length ? `<div class="notice">${noEmailTeams.length} team(s) have no email address at all: ${noEmailTeams.map((t) => `<b>${esc(t.name)}</b>`).join(", ")}. Add an email under <a href="#/teams">Teams</a> or print their badges.</div>` : ""}
     <div class="card">
       <div class="row">
-        <button class="btn primary lg" data-send="pending" ${pending.length ? "" : "disabled"}>✉ Send to everyone not yet mailed (${pending.length})</button>
-        <button class="btn" data-send="failed" ${failed.length ? "" : "disabled"}>Retry failed (${failed.length})</button>
-        <button class="btn" data-send="all" ${withEmail.length ? "" : "disabled"}>Resend to all (${withEmail.length})</button>
+        <button class="btn primary lg" data-send="pending" ${lists.pending.length ? "" : "disabled"}>✉ Send to all not yet mailed (${plural(lists.pending.length)}${mode === "team" ? ` · ${peopleIn(lists.pending)} QRs` : ""})</button>
+        <button class="btn" data-send="failed" ${lists.failed.length ? "" : "disabled"}>Retry failed (${lists.failed.length})</button>
+        <button class="btn" data-send="all" ${lists.all.length ? "" : "disabled"}>Resend to all (${lists.all.length})</button>
         <button class="btn" id="test">Send test email to me</button>
       </div>
       <div id="job" style="margin-top:16px;display:none">
         <div class="progress"><div id="bar"></div></div>
         <div class="row" style="justify-content:space-between;margin-top:6px"><span class="small" id="job-st"></span><button class="btn sm danger" id="stop">Stop</button></div>
       </div>
-      <p class="small muted" style="margin-bottom:0">Emails go out in small batches from the Gmail account configured on the server. Gmail allows ~2,000/day for Workspace accounts (500 for personal),
-        so all ${withEmail.length} fit in one go. You can close this tab and come back – progress is saved per person; just click "Send to everyone not yet mailed" again.
-        Edit the subject/message under <a href="#/settings">Settings</a>.</p>
+      <p class="small muted" style="margin-bottom:0">Emails go out in small batches from the Gmail account set up on the server (Gmail allows ~2,000/day on Workspace, 500 on personal accounts).
+        Progress is saved, so you can close this tab and click "Send to all not yet mailed" again later. Edit the subject and message under <a href="#/settings">Settings</a>.</p>
     </div>
-    ${failed.length ? `<div class="card"><h2>Failed</h2><div class="table-wrap"><table><thead><tr><th>Name</th><th>Team</th><th>Email</th><th>Error</th></tr></thead><tbody>
-      ${failed.map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.teams?.name)}</td><td>${esc(p.email)}</td><td class="small muted">${esc(p.email_error)}</td></tr>`).join("")}</tbody></table></div></div>` : ""}`;
+    ${failedRows.length ? `<div class="card"><h2>Failed</h2><div class="table-wrap"><table><thead><tr><th>${mode === "team" ? "Team" : "Name"}</th><th>Email</th><th>Error</th></tr></thead><tbody>
+      ${failedRows.map((r) => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td class="small muted">${esc(r[2])}</td></tr>`).join("")}</tbody></table></div></div>` : ""}`;
 
   $("#test").onclick = async (e) => {
     e.target.disabled = true;
@@ -737,18 +784,20 @@ async function viewEmails(main) {
   $("#stop").onclick = () => { mailJob.cancel = true; $("#job-st").textContent = "Stopping after this batch…"; };
 
   $$("[data-send]").forEach((b) => (b.onclick = async () => {
-    const list = { pending, failed, all: withEmail }[b.dataset.send];
-    if (!(await confirmBox(`Send QR emails to <b>${list.length}</b> participant(s)?`, "Send now"))) return;
+    const list = lists[b.dataset.send];
+    const what = mode === "team" ? `${plural(list.length)} (${peopleIn(list)} QR codes, one email per team leader)` : plural(list.length);
+    if (!(await confirmBox(`Send QR emails to <b>${what}</b>?`, "Send now"))) return;
     if (mailJob.running) return toast("Already sending", "bad");
     Object.assign(mailJob, { running: true, cancel: false });
     $$("[data-send], #test").forEach((x) => (x.disabled = true));
     $("#job").style.display = "";
     let ok = 0, bad = 0;
-    const BATCH = 8;
+    const BATCH = mode === "team" ? 3 : 8;
     for (let i = 0; i < list.length && !mailJob.cancel; i += BATCH) {
-      const ids = list.slice(i, i + BATCH).map((p) => p.id);
+      const ids = list.slice(i, i + BATCH).map((x) => x.id);
       try {
-        const { results } = await callAdmin({ action: "send_qr", ids });
+        const body = mode === "team" ? { action: "send_team", team_ids: ids } : { action: "send_qr", ids };
+        const { results } = await callAdmin(body);
         results.forEach((r) => (r.ok ? ok++ : bad++));
       } catch (er) {
         bad += ids.length;
@@ -759,7 +808,7 @@ async function viewEmails(main) {
       const done = Math.min(i + BATCH, list.length);
       if ($("#bar")) {
         $("#bar").style.width = `${(done / list.length) * 100}%`;
-        $("#job-st").textContent = `${done} / ${list.length} processed · ${ok} sent · ${bad} failed`;
+        $("#job-st").textContent = `${done} / ${list.length} ${unit === "team" ? "teams" : "people"} processed · ${ok} sent · ${bad} failed`;
       }
     }
     mailJob.running = false;
@@ -936,14 +985,14 @@ async function viewJudge(main, cpId, teamId) {
 
 async function judgeTeam(main, cp, teamId) {
   const [team, existing] = await Promise.all([
-    sb.from("teams").select("id,name,participants(name,is_leader)").eq("id", teamId).single().then(must),
+    sb.from("teams").select("id,name,college,participants(name,is_leader)").eq("id", teamId).single().then(must),
     sb.from("scores").select("*").eq("checkpoint_id", cp.id).eq("team_id", teamId).eq("judge_id", state.user.id).maybeSingle().then(must),
   ]);
   const vals = existing?.scores || {};
   const max = cp.criteria.reduce((n, c) => n + Number(c.max), 0);
   main.innerHTML = `
     <div class="page-head"><div><a href="#/judge/${cp.id}" class="small">← All teams</a><h1>${esc(team.name)}</h1>
-      <p class="muted">${esc(cp.name)} · ${team.participants.map((p) => esc(p.name) + (p.is_leader ? " (lead)" : "")).join(", ")}</p></div></div>
+      <p class="muted">${esc(cp.name)}${team.college ? " · " + esc(team.college) : ""} · ${team.participants.map((p) => esc(p.name) + (p.is_leader ? " (lead)" : "")).join(", ")}</p></div></div>
     <form class="card" id="sf" style="max-width:640px">
       ${cp.criteria.map((c, i) => `<div class="crit"><div><label>${esc(c.name)} <span class="muted">/ ${c.max}</span></label>
         <input type="range" min="0" max="${c.max}" step="0.5" value="${vals[c.name] ?? 0}" data-i="${i}"></div>

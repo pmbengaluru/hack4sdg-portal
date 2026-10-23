@@ -69,14 +69,15 @@ The camera scanner needs **https**, which GitHub Pages provides.
 
 ## Using it on event day
 
-1. **Import CSV.** Upload the Google Form export. Two layouts are detected automatically:
-   - one row per team: `Team Name, Team Size, Team Leader Name, Team Leader Email, Member 2 Name, Member 2 Email, …`
+1. **Import.** Upload the Google Form responses as **.xlsx** or **.csv**. Two layouts are detected automatically:
+   - one row per team, as in the Hack4SDG registration form: `College Name, Team Name, Team Leader Name, Team Leader Email ID, Team Size, Team Member Name 2, Team Member 2 Phone Number, …`.
+     Forms that branch by team size repeat columns (`Team Member Name 2 3`); these are handled, and `Team Member Name 1 (Leader)` is merged with the leader.
    - one row per person: `Team Name, Name, Email, Phone, Role`
 
-   The preview shows every team with its members, plus warnings for missing emails, team-size mismatches and duplicates, before anything is saved. Re-importing updates people (matched by email) and keeps their QR codes.
+   The preview shows every team with its members before anything is saved. It warns about teams that submitted twice (the latest row is used), the same leader listed under two team names, team-size mismatches and teams with no email. Re-importing updates people and keeps their QR codes.
 2. **Checkpoints.** Create each one as a **QR scan** checkpoint (volunteers) or a **Judging** checkpoint (mentors, with grading criteria and max marks). Open or close them as the day goes on.
 3. **Staff.** Add admins, volunteers and mentors one at a time, or paste many as `name, email, role`. Their login details are emailed to them and also shown to you once.
-4. **Send QR emails.** Click **Send to everyone not yet mailed**. Progress is saved per person, so you can stop and resume. Failed sends can be retried.
+4. **Send QR emails.** In **Per team** mode (the default), each team leader gets one email with every member's QR, shown inline and attached as separate images to forward. Any member with their own email is cc'd. **Per person** mode emails only people who have their own address. Click **Send to all not yet mailed**. Progress is saved, so you can stop and resume. Failed sends can be retried.
 5. **Scan.** Volunteers open the site on their phone, pick the checkpoint and scan. A green screen means checked in; a yellow screen means already scanned (it shows when and by whom).
 6. **Judge.** Mentors scan any team member's QR, enter scores and comments, and save. They can edit their own scores later.
 7. **Results.** The leaderboard shows each team's average across judges and per-criterion averages. You can export scores and attendance as CSV.

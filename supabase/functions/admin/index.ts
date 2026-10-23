@@ -102,6 +102,73 @@ async function sendQr(ids: number[]) {
   return results;
 }
 
+// One email per team to the leader (cc any other member with an email) carrying every member's QR.
+// Used when the registration form only collected the leader's email.
+async function sendTeams(teamIds: number[]) {
+  const s = await getSettings();
+  const event = s.event_name || "Hackathon";
+  const { data: teams, error } = await db
+    .from("teams")
+    .select("id,name,participants(id,name,email,token,is_leader)")
+    .in("id", teamIds);
+  if (error) throw error;
+
+  const results = [];
+  for (const t of teams ?? []) {
+    const members = [...(t.participants ?? [])].sort((a, b) => Number(b.is_leader) - Number(a.is_leader) || a.name.localeCompare(b.name));
+    const ids = members.map((m) => m.id);
+    const lead = members.find((m) => m.is_leader && m.email) ?? members.find((m) => m.email);
+    if (!lead) {
+      await db.from("participants").update({ email_status: "failed", email_error: "No email address in team" }).in("id", ids);
+      results.push({ team_id: t.id, ok: false, error: "No email address in team" });
+      continue;
+    }
+    try {
+      const cc = [...new Set(members.map((m) => m.email).filter((e) => e && e !== lead.email))];
+      const vars = { name: lead.name, team: t.name, event, code: lead.token };
+      const attachments: { filename: string; content: Uint8Array; cid?: string }[] = [];
+      const blocks: string[] = [];
+      for (const [i, m] of members.entries()) {
+        const png = await QRCode.toBuffer(m.token, { width: 420, margin: 2, errorCorrectionLevel: "M" });
+        attachments.push({ filename: `qr${i}.png`, content: png, cid: `qr${i}` });
+        attachments.push({ filename: `${m.name.replace(/[^\w]+/g, "_")}_QR.png`, content: png });
+        blocks.push(`<td style="text-align:center;padding:10px;vertical-align:top;width:50%">
+          <img src="cid:qr${i}" width="180" height="180" alt="QR for ${esc(m.name)}" style="border:1px solid #e5e7eb;border-radius:8px">
+          <div style="font-weight:700;margin-top:6px">${esc(m.name)}${m.is_leader ? " (Leader)" : ""}</div>
+          <div style="font-size:12px;color:#6b7280">Pass code <b style="letter-spacing:1px;color:#111">${esc(m.token)}</b></div></td>`);
+      }
+      const rows = [];
+      for (let i = 0; i < blocks.length; i += 2) rows.push(`<tr>${blocks[i]}${blocks[i + 1] ?? "<td></td>"}</tr>`);
+      const message = esc(fill(s.email_message || "", vars)).replace(/\n/g, "<br>");
+      const html = shell(event, `
+        <p style="font-size:15px;line-height:1.55">${message}</p>
+        <p style="font-size:14px;background:#fef3c7;color:#92400e;padding:10px 12px;border-radius:8px">
+          This email has the entry QR codes for all <b>${members.length}</b> members of <b>${esc(t.name)}</b>.
+          <b>Every member must show their own QR</b> – please forward each person their image (also attached separately below).</p>
+        <table style="width:100%;border-collapse:collapse">${rows.join("")}</table>`);
+      await transporter.sendMail({
+        from: FROM,
+        to: lead.email,
+        cc: cc.length ? cc : undefined,
+        subject: fill(s.email_subject || "Your event passes", vars),
+        html,
+        text: `${fill(s.email_message || "", vars)}\n\nQR pass codes for ${t.name}:\n` +
+          members.map((m) => `- ${m.name}: ${m.token}`).join("\n"),
+        attachments,
+      });
+      await db.from("participants")
+        .update({ email_status: "sent", email_sent_at: new Date().toISOString(), email_error: null })
+        .in("id", ids);
+      results.push({ team_id: t.id, ok: true, to: lead.email, count: members.length });
+    } catch (e) {
+      const msg = String((e as Error).message ?? e).slice(0, 300);
+      await db.from("participants").update({ email_status: "failed", email_error: msg }).in("id", ids);
+      results.push({ team_id: t.id, ok: false, error: msg });
+    }
+  }
+  return results;
+}
+
 async function findAuthUser(email: string) {
   for (let page = 1; page < 50; page++) {
     const { data, error } = await db.auth.admin.listUsers({ page, perPage: 200 });
@@ -144,6 +211,11 @@ Deno.serve(async (req) => {
       case "send_qr": {
         const ids = (body.ids ?? []).slice(0, 25).map(Number);
         return json({ results: await sendQr(ids) });
+      }
+
+      case "send_team": {
+        const ids = (body.team_ids ?? []).slice(0, 5).map(Number);
+        return json({ results: await sendTeams(ids) });
       }
 
       case "test_email": {
