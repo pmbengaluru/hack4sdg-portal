@@ -1,0 +1,1092 @@
+import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js";
+import { analyzeCSV, toCSV } from "./csv.js";
+
+const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
+const app = document.getElementById("app");
+
+const state = { user: null, me: null, settings: {}, scanner: null };
+
+// ------------------------------------------------------------------ helpers
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+const fmtTime = (t) => (t ? new Date(t).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function toast(msg, kind = "") {
+  const el = document.createElement("div");
+  el.className = `toast ${kind}`;
+  el.textContent = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.remove(), kind === "bad" ? 6000 : 3000);
+}
+
+function must({ data, error }) {
+  if (error) throw error;
+  return data;
+}
+
+function modal(html, onMount) {
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  bg.innerHTML = `<div class="modal">${html}</div>`;
+  const close = () => bg.remove();
+  bg.addEventListener("click", (e) => { if (e.target === bg || e.target.closest("[data-close]")) close(); });
+  document.body.appendChild(bg);
+  onMount?.(bg.firstElementChild, close);
+  return close;
+}
+
+function confirmBox(message, okLabel = "Confirm", danger = false) {
+  return new Promise((resolve) => {
+    modal(`<p>${message}</p><div class="actions"><button class="btn" data-close>Cancel</button>
+      <button class="btn ${danger ? "danger" : "primary"}" id="cf-ok">${esc(okLabel)}</button></div>`, (m, close) => {
+      $("#cf-ok", m).onclick = () => { close(); resolve(true); };
+      m.parentElement.addEventListener("click", (e) => { if (e.target === m.parentElement || e.target.closest("[data-close]")) resolve(false); });
+    });
+  });
+}
+
+function download(filename, text, type = "text/csv") {
+  const blob = new Blob([text], { type });
+  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: filename });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// QR helpers (qrcode-generator global)
+function qrMatrix(text) {
+  const q = window.qrcode(0, "M");
+  q.addData(text);
+  q.make();
+  return q;
+}
+function qrSvg(text) {
+  const q = qrMatrix(text);
+  const n = q.getModuleCount(), m = 2, size = n + m * 2;
+  let path = "";
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (q.isDark(r, c)) path += `M${c + m},${r + m}h1v1h-1z`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#fff"/><path d="${path}" fill="#000"/></svg>`;
+}
+function qrPng(text, label, sub) {
+  const q = qrMatrix(text);
+  const n = q.getModuleCount(), cell = 12, m = 4, w = (n + m * 2) * cell, extra = label ? 90 : 0;
+  const cv = Object.assign(document.createElement("canvas"), { width: w, height: w + extra });
+  const ctx = cv.getContext("2d");
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = "#000";
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (q.isDark(r, c)) ctx.fillRect((c + m) * cell, (r + m) * cell, cell, cell);
+  if (label) {
+    ctx.textAlign = "center";
+    ctx.font = "bold 28px Inter, Arial"; ctx.fillText(label, w / 2, w + 30);
+    ctx.font = "22px Inter, Arial"; ctx.fillStyle = "#444"; ctx.fillText(sub || "", w / 2, w + 62);
+  }
+  return cv.toDataURL("image/png");
+}
+
+let audioCtx;
+function beep(ok = true) {
+  try {
+    audioCtx ??= new AudioContext();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.frequency.value = ok ? 880 : 220;
+    g.gain.value = 0.15;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + (ok ? 0.12 : 0.35));
+    navigator.vibrate?.(ok ? 80 : [80, 60, 80]);
+  } catch { /* audio not available */ }
+}
+
+async function callAdmin(body) {
+  const { data, error } = await sb.functions.invoke("admin", { body });
+  if (error) {
+    let msg = error.message;
+    try { msg = (await error.context.json()).error || msg; } catch { /* not json */ }
+    throw new Error(msg);
+  }
+  if (data?.error) throw new Error(data.error);
+  return data;
+}
+
+// ------------------------------------------------------------------ data
+async function loadSettings() {
+  const rows = must(await sb.from("settings").select("key,value"));
+  state.settings = Object.fromEntries(rows.map((r) => [r.key, r.value ?? ""]));
+  document.title = `${state.settings.event_name || "Event"} Portal`;
+}
+const getCheckpoints = async () => must(await sb.from("checkpoints").select("*").order("sort_order").order("id"));
+const getTeams = async () =>
+  must(await sb.from("teams").select("id,name,declared_size,participants(id,name,email,phone,is_leader,token,email_status,email_sent_at,email_error)").order("name"));
+const getParticipants = async () =>
+  must(await sb.from("participants").select("id,name,email,phone,token,email_status,email_error,team_id,teams(name)").order("name"));
+
+// ------------------------------------------------------------------ routing
+const ROUTES = {
+  dashboard: { label: "Dashboard", icon: "▦", roles: ["admin"], view: viewDashboard },
+  teams: { label: "Teams & QR", icon: "👥", roles: ["admin"], view: viewTeams },
+  import: { label: "Import CSV", icon: "⇪", roles: ["admin"], view: viewImport },
+  checkpoints: { label: "Checkpoints", icon: "⚑", roles: ["admin"], view: viewCheckpoints },
+  staff: { label: "Staff", icon: "🛡", roles: ["admin"], view: viewStaff },
+  emails: { label: "Send QR emails", icon: "✉", roles: ["admin"], view: viewEmails },
+  scan: { label: "Scan", icon: "⌖", roles: ["admin", "volunteer"], view: viewScan },
+  judge: { label: "Judge", icon: "★", roles: ["admin", "mentor"], view: viewJudge },
+  results: { label: "Results", icon: "🏆", roles: ["admin"], view: viewResults },
+  settings: { label: "Settings", icon: "⚙", roles: ["admin"], view: viewSettings },
+  account: { label: "My account", icon: "☺", roles: ["admin", "volunteer", "mentor"], view: viewAccount },
+  print: { label: "Print badges", roles: ["admin"], view: viewPrint, hidden: true },
+};
+const homeFor = (role) => ({ admin: "dashboard", volunteer: "scan", mentor: "judge" }[role]);
+
+async function route() {
+  if (!state.me) return;
+  await stopScanner();
+  let [name, ...args] = location.hash.replace(/^#\/?/, "").split("/");
+  const r = ROUTES[name];
+  if (!r || !r.roles.includes(state.me.role)) {
+    location.hash = `#/${homeFor(state.me.role)}`;
+    return;
+  }
+  $$(".nav a, .mnav a").forEach((a) => a.classList.toggle("active", a.dataset.r === name));
+  const main = $("#main");
+  main.innerHTML = `<div class="muted">Loading…</div>`;
+  try {
+    await r.view(main, ...args);
+  } catch (e) {
+    console.error(e);
+    main.innerHTML = `<div class="card"><h2>Something went wrong</h2><p class="muted">${esc(e.message)}</p></div>`;
+  }
+}
+window.addEventListener("hashchange", route);
+
+function renderShell() {
+  const links = Object.entries(ROUTES).filter(([, r]) => !r.hidden && r.roles.includes(state.me.role));
+  const nav = links.map(([k, r]) => `<a href="#/${k}" data-r="${k}"><span>${r.icon}</span>${r.label}</a>`).join("");
+  const ev = esc(state.settings.event_name || "Event");
+  app.innerHTML = `
+    <div class="topbar"><div class="brand"><div class="logo">QR</div>${ev}</div>
+      <button class="btn sm" id="logout2">Sign out</button></div>
+    <nav class="mnav">${links.map(([k, r]) => `<a href="#/${k}" data-r="${k}">${r.label}</a>`).join("")}</nav>
+    <div class="shell">
+      <aside class="side">
+        <div class="brand"><div class="logo">QR</div>${ev}</div>
+        <nav class="nav">${nav}</nav>
+        <div class="me"><b>${esc(state.me.name)}</b><br><span class="badge brand">${state.me.role}</span>
+          <div style="margin-top:10px"><button class="btn sm" id="logout">Sign out</button></div></div>
+      </aside>
+      <main class="main" id="main"></main>
+    </div>`;
+  const out = async () => { await stopScanner(); await sb.auth.signOut(); location.hash = ""; boot(); };
+  $("#logout").onclick = out;
+  $("#logout2").onclick = out;
+}
+
+// ------------------------------------------------------------------ auth
+function viewLogin(message = "") {
+  app.innerHTML = `
+    <div class="login"><form class="card" id="login-form">
+      <div class="brand"><div class="logo">QR</div>Event Portal</div>
+      <h1>Sign in</h1>
+      <p class="muted small">For admins, volunteers and mentors. Ask an admin if you don't have a login.</p>
+      ${message ? `<div class="notice">${message}</div>` : ""}
+      <div class="field"><label>Email</label><input type="email" name="email" required autocomplete="username"></div>
+      <div class="field"><label>Password</label><input type="password" name="password" required autocomplete="current-password"></div>
+      <button class="btn primary lg" style="width:100%">Sign in</button>
+    </form></div>`;
+  $("#login-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const btn = $("button", e.target);
+    btn.disabled = true;
+    const { error } = await sb.auth.signInWithPassword({ email: f.get("email").trim(), password: f.get("password") });
+    btn.disabled = false;
+    if (error) return toast(error.message, "bad");
+    boot();
+  };
+}
+
+async function boot() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) return viewLogin();
+  state.user = session.user;
+  const { data: me, error } = await sb.from("staff").select("*").eq("email", session.user.email.toLowerCase()).maybeSingle();
+  if (error || !me) {
+    await sb.auth.signOut();
+    return viewLogin(error ? esc(error.message) : "This account isn't registered as staff for the event. Ask an admin to add you.");
+  }
+  state.me = me;
+  await loadSettings();
+  renderShell();
+  route();
+}
+
+// ------------------------------------------------------------------ dashboard
+async function viewDashboard(main) {
+  const [parts, cps, staff, scans, scores, teams] = await Promise.all([
+    sb.from("participants").select("id,email_status").then(must),
+    getCheckpoints(),
+    sb.from("staff").select("role").then(must),
+    sb.from("scans").select("checkpoint_id").then(must),
+    sb.from("scores").select("checkpoint_id,team_id").then(must),
+    sb.from("teams").select("id", { count: "exact", head: true }),
+  ]);
+  const count = (arr, f) => arr.filter(f).length;
+  const stat = (v, l) => `<div class="stat"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+  const cpRows = cps.map((c) => {
+    if (c.type === "scan") {
+      const n = count(scans, (s) => s.checkpoint_id === c.id);
+      const pct = parts.length ? Math.round((n / parts.length) * 100) : 0;
+      return `<tr><td><b>${esc(c.name)}</b></td><td><span class="badge info">Scan</span></td>
+        <td>${c.active ? '<span class="badge ok">Open</span>' : '<span class="badge">Closed</span>'}</td>
+        <td style="min-width:160px"><div class="progress"><div style="width:${pct}%"></div></div><span class="small muted">${n} / ${parts.length} people</span></td></tr>`;
+    }
+    const n = new Set(scores.filter((s) => s.checkpoint_id === c.id).map((s) => s.team_id)).size;
+    const pct = teams.count ? Math.round((n / teams.count) * 100) : 0;
+    return `<tr><td><b>${esc(c.name)}</b></td><td><span class="badge warn">Judging</span></td>
+      <td>${c.active ? '<span class="badge ok">Open</span>' : '<span class="badge">Closed</span>'}</td>
+      <td><div class="progress"><div style="width:${pct}%"></div></div><span class="small muted">${n} / ${teams.count} teams graded</span></td></tr>`;
+  }).join("");
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Dashboard</h1><p class="muted">${esc(state.settings.event_name)} at a glance</p></div>
+      <div class="row"><a class="btn" href="#/import">Import CSV</a><a class="btn primary" href="#/emails">Send QR emails</a></div></div>
+    <div class="grid stats" style="margin-bottom:16px">
+      ${stat(teams.count ?? 0, "Teams")}
+      ${stat(parts.length, "Participants")}
+      ${stat(count(parts, (p) => p.email_status === "sent"), "QR emails sent")}
+      ${stat(count(parts, (p) => p.email_status === "failed"), "Emails failed")}
+      ${stat(count(staff, (s) => s.role === "volunteer"), "Volunteers")}
+      ${stat(count(staff, (s) => s.role === "mentor"), "Mentors / judges")}
+    </div>
+    <div class="card"><div class="row" style="justify-content:space-between;margin-bottom:8px"><h2>Checkpoints</h2>
+      <a class="btn sm" href="#/checkpoints">Manage</a></div>
+      ${cps.length ? `<div class="table-wrap"><table><thead><tr><th>Checkpoint</th><th>Type</th><th>Status</th><th>Progress</th></tr></thead><tbody>${cpRows}</tbody></table></div>`
+        : `<div class="empty">No checkpoints yet. <a href="#/checkpoints">Create check-in, meals, judging rounds…</a></div>`}
+    </div>
+    ${!parts.length ? `<div class="notice info">Start by importing the registration CSV under <a href="#/import">Import CSV</a>.</div>` : ""}`;
+}
+
+// ------------------------------------------------------------------ import
+function viewImport(main) {
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Import participants</h1>
+      <p class="muted">Upload the registration CSV. Members are grouped under their team automatically and each person gets a unique QR code.</p></div></div>
+    <div class="card">
+      <div class="dropzone" id="drop"><b>Drop CSV here</b> or click to choose a file<br>
+        <span class="small muted">Export from Google Forms / Sheets as .csv</span>
+        <input type="file" id="file" accept=".csv,text/csv" hidden></div>
+      <details style="margin-top:14px"><summary class="small"><b>Which CSV layouts work?</b></summary>
+        <div class="small muted" style="margin-top:8px">
+          <p><b>One row per team</b> (typical Google Form): <code>Team Name, Team Size, Team Leader Name, Team Leader Email, Member 2 Name, Member 2 Email, Member 3 Name, …</code></p>
+          <p><b>One row per person</b>: <code>Team Name, Name, Email, Phone, Role</code> (Role "Leader" marks the leader)</p>
+          <p>Column names are matched loosely ("Member 1 Mail ID", "2nd member name", "Email Address" all work). Extra columns are ignored.
+          Re-importing updates existing people (matched by email) and keeps their QR codes.</p>
+          <div class="row"><button class="btn sm" id="tpl-wide">Download team-row template</button>
+          <button class="btn sm" id="tpl-long">Download person-row template</button></div>
+        </div></details>
+    </div>
+    <div id="preview"></div>`;
+  const drop = $("#drop"), file = $("#file");
+  drop.onclick = () => file.click();
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+  drop.ondragleave = () => drop.classList.remove("over");
+  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); if (e.dataTransfer.files[0]) handle(e.dataTransfer.files[0]); };
+  file.onchange = () => file.files[0] && handle(file.files[0]);
+  $("#tpl-wide").onclick = () => download("teams_template.csv", toCSV([
+    ["Team Name", "Team Size", "Team Leader Name", "Team Leader Email", "Team Leader Phone", "Member 2 Name", "Member 2 Email", "Member 3 Name", "Member 3 Email", "Member 4 Name", "Member 4 Email"],
+    ["Code Crusaders", 3, "Asha Rao", "asha@example.com", "9876543210", "Ravi K", "ravi@example.com", "Meena S", "meena@example.com", "", ""],
+  ]));
+  $("#tpl-long").onclick = () => download("participants_template.csv", toCSV([
+    ["Team Name", "Name", "Email", "Phone", "Role"],
+    ["Code Crusaders", "Asha Rao", "asha@example.com", "9876543210", "Leader"],
+    ["Code Crusaders", "Ravi K", "ravi@example.com", "", ""],
+  ]));
+
+  async function handle(f) {
+    const text = await f.text();
+    let res;
+    try { res = analyzeCSV(text); } catch (e) {
+      $("#preview").innerHTML = `<div class="card"><div class="notice">${esc(e.message)}</div></div>`;
+      return;
+    }
+    const sizes = {};
+    res.teams.forEach((t) => (sizes[t.members.length] = (sizes[t.members.length] || 0) + 1));
+    $("#preview").innerHTML = `
+      <div class="card">
+        <h2>Preview – ${esc(f.name)}</h2>
+        <div class="grid stats" style="margin:12px 0">
+          <div class="stat"><div class="v">${res.teams.length}</div><div class="l">Teams</div></div>
+          <div class="stat"><div class="v">${res.memberCount}</div><div class="l">Participants</div></div>
+          <div class="stat"><div class="v">${res.teams.filter((t) => t.members.some((m) => !m.email)).length}</div><div class="l">Teams w/ missing emails</div></div>
+        </div>
+        <p class="small muted">Detected layout: <b>${res.mode === "wide" ? "one row per team" : "one row per person"}</b> ·
+          Team sizes: ${Object.entries(sizes).map(([k, v]) => `${v} team(s) of ${k}`).join(", ")}</p>
+        ${res.warnings.length ? `<div class="notice"><b>${res.warnings.length} warning(s)</b><ul class="warnings">${res.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
+        <div class="table-wrap" style="max-height:380px;overflow:auto;border:1px solid var(--line);border-radius:8px">
+          <table><thead><tr><th>Team</th><th>Size</th><th>Members</th></tr></thead><tbody>
+          ${res.teams.map((t) => `<tr><td><b>${esc(t.name)}</b></td><td>${t.members.length}${t.size && t.size !== t.members.length ? ` <span class="badge warn">says ${t.size}</span>` : ""}</td>
+            <td>${t.members.map((m) => `${esc(m.name)}${m.leader ? ' <span class="badge brand">Lead</span>' : ""} <span class="muted small">${esc(m.email || "no email")}</span>`).join("<br>")}</td></tr>`).join("")}
+          </tbody></table></div>
+        <div style="margin-top:16px">
+          <label class="check"><input type="radio" name="mode" value="merge" checked> Add / update (keeps existing teams, scans and QR codes)</label>
+          <label class="check"><input type="radio" name="mode" value="replace"> Replace everything (deletes all current teams, participants, scans and scores)</label>
+        </div>
+        <div class="row" style="margin-top:14px"><button class="btn primary lg" id="do-import">Import ${res.teams.length} teams · ${res.memberCount} people</button></div>
+      </div>`;
+    $("#do-import").onclick = async () => {
+      const replace = $('input[name=mode]:checked').value === "replace";
+      if (replace && !(await confirmBox("This deletes <b>all</b> existing teams, participants, scans and scores before importing. Continue?", "Replace all", true))) return;
+      const btn = $("#do-import");
+      btn.disabled = true; btn.textContent = "Importing…";
+      try {
+        const out = must(await sb.rpc("import_teams", { p_data: res.teams, p_replace: replace }));
+        toast(`Imported: ${out.teams_created} new teams, ${out.members_created} new people, ${out.members_updated} updated`, "ok");
+        location.hash = "#/teams";
+      } catch (e) {
+        toast(e.message, "bad");
+        btn.disabled = false; btn.textContent = "Try again";
+      }
+    };
+  }
+}
+
+// ------------------------------------------------------------------ teams
+function emailBadge(p) {
+  if (!p.email) return '<span class="badge bad">No email</span>';
+  if (p.email_status === "sent") return `<span class="badge ok" title="${esc(fmtTime(p.email_sent_at))}">Mailed</span>`;
+  if (p.email_status === "failed") return `<span class="badge bad" title="${esc(p.email_error)}">Mail failed</span>`;
+  return '<span class="badge">Not mailed</span>';
+}
+
+function showQr(p, teamName) {
+  modal(`
+    <h2>${esc(p.name)}</h2><p class="muted small" style="margin:0 0 12px">${esc(teamName)} · ${esc(p.email || "no email")}</p>
+    <div class="qr-box">${qrSvg(p.token)}</div>
+    <p style="text-align:center">Pass code <span class="code">${esc(p.token)}</span></p>
+    <div class="actions">
+      <button class="btn" data-close>Close</button>
+      <button class="btn" id="qr-dl">Download PNG</button>
+      ${p.email ? `<button class="btn primary" id="qr-mail">${p.email_status === "sent" ? "Resend" : "Send"} email</button>` : ""}
+    </div>`, (m, close) => {
+    $("#qr-dl", m).onclick = () => {
+      const a = Object.assign(document.createElement("a"), { href: qrPng(p.token, p.name, teamName), download: `${p.name.replace(/\W+/g, "_")}_QR.png` });
+      a.click();
+    };
+    const mail = $("#qr-mail", m);
+    if (mail) mail.onclick = async () => {
+      mail.disabled = true; mail.textContent = "Sending…";
+      try {
+        const { results } = await callAdmin({ action: "send_qr", ids: [p.id] });
+        if (results[0]?.ok) { toast(`QR sent to ${p.email}`, "ok"); close(); route(); }
+        else throw new Error(results[0]?.error || "Failed");
+      } catch (e) { toast(e.message, "bad"); mail.disabled = false; mail.textContent = "Retry"; }
+    };
+  });
+}
+
+function editParticipant(p, teams) {
+  const isNew = !p.id;
+  modal(`
+    <h2>${isNew ? "Add participant" : "Edit participant"}</h2>
+    <form id="pf">
+      <div class="field"><label>Name</label><input name="name" required value="${esc(p.name)}"></div>
+      <div class="field"><label>Email</label><input name="email" type="email" value="${esc(p.email)}"></div>
+      <div class="field"><label>Phone</label><input name="phone" value="${esc(p.phone)}"></div>
+      <div class="field"><label>Team</label><select name="team_id">${teams.map((t) => `<option value="${t.id}" ${t.id === p.team_id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></div>
+      <label class="check"><input type="checkbox" name="is_leader" ${p.is_leader ? "checked" : ""}> Team leader</label>
+      <div class="actions">
+        ${isNew ? "" : '<button type="button" class="btn danger" id="p-del">Delete</button><button type="button" class="btn" id="p-regen">New QR code</button>'}
+        <button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+    </form>`, (m, close) => {
+    $("#pf", m).onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const row = {
+        name: f.get("name").trim(), email: f.get("email").trim().toLowerCase() || null, phone: f.get("phone").trim() || null,
+        team_id: Number(f.get("team_id")), is_leader: f.get("is_leader") === "on",
+      };
+      try {
+        must(isNew ? await sb.from("participants").insert(row) : await sb.from("participants").update(row).eq("id", p.id));
+        toast("Saved", "ok"); close(); route();
+      } catch (er) { toast(er.message.includes("participants_email_key") ? "That email is already registered" : er.message, "bad"); }
+    };
+    if (!isNew) {
+      $("#p-del", m).onclick = async () => {
+        if (!(await confirmBox(`Delete ${esc(p.name)}? Their scans are removed too.`, "Delete", true))) return;
+        try { must(await sb.from("participants").delete().eq("id", p.id)); toast("Deleted"); close(); route(); } catch (er) { toast(er.message, "bad"); }
+      };
+      $("#p-regen", m).onclick = async () => {
+        if (!(await confirmBox("Issue a new QR code? The old one stops working and the person needs the new email.", "New code"))) return;
+        const token = crypto.randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase();
+        try { must(await sb.from("participants").update({ token, email_status: "pending" }).eq("id", p.id)); toast("New QR issued", "ok"); close(); route(); } catch (er) { toast(er.message, "bad"); }
+      };
+    }
+  });
+}
+
+async function viewTeams(main) {
+  const teams = await getTeams();
+  const total = teams.reduce((n, t) => n + t.participants.length, 0);
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Teams & QR codes</h1><p class="muted">${teams.length} teams · ${total} participants</p></div>
+      <div class="row"><button class="btn" id="add-team">+ Team</button><button class="btn" id="add-p" ${teams.length ? "" : "disabled"}>+ Participant</button>
+      <button class="btn" id="exp">Export CSV</button><a class="btn" href="#/print">Print badges</a></div></div>
+    <div class="row" style="margin-bottom:14px"><input class="grow" id="q" placeholder="Search team, name, email or code…">
+      <select id="filter" style="width:auto"><option value="">All</option><option value="pending">Not mailed</option><option value="sent">Mailed</option><option value="failed">Mail failed</option><option value="noemail">No email</option></select></div>
+    <div id="list"></div>`;
+
+  const draw = () => {
+    const q = $("#q").value.trim().toLowerCase(), fl = $("#filter").value;
+    const match = (p) => (!fl || (fl === "noemail" ? !p.email : p.email && p.email_status === fl));
+    const rows = teams.map((t) => {
+      const teamHit = !q || t.name.toLowerCase().includes(q);
+      const ms = t.participants.filter((p) => match(p) && (teamHit || [p.name, p.email, p.token].some((v) => (v || "").toLowerCase().includes(q))));
+      return { t, ms };
+    }).filter((x) => x.ms.length || (!fl && (!q || x.t.name.toLowerCase().includes(q))));
+    $("#list").innerHTML = rows.length ? rows.map(({ t, ms }) => {
+      const sent = t.participants.filter((p) => p.email_status === "sent").length;
+      const sorted = [...ms].sort((a, b) => b.is_leader - a.is_leader || a.name.localeCompare(b.name));
+      return `<details class="team" ${q || fl ? "open" : ""}>
+        <summary><span class="name">${esc(t.name)}</span>
+          <span class="badge">${t.participants.length} member${t.participants.length === 1 ? "" : "s"}</span>
+          ${t.declared_size && t.declared_size !== t.participants.length ? `<span class="badge warn">size ${t.declared_size}</span>` : ""}
+          <span class="badge ${sent === t.participants.length && sent ? "ok" : ""}">${sent}/${t.participants.length} mailed</span>
+          <button class="btn sm" data-team-edit="${t.id}">Rename</button></summary>
+        <div class="members">${sorted.map((p) => `
+          <div class="member"><div class="who"><b>${esc(p.name)}</b> ${p.is_leader ? '<span class="badge brand">Lead</span>' : ""}<br>
+            <span class="small muted">${esc(p.email || "—")} ${p.phone ? "· " + esc(p.phone) : ""} · <span class="code">${esc(p.token)}</span></span></div>
+            ${emailBadge(p)}
+            <button class="btn sm" data-qr="${p.id}">QR</button><button class="btn sm" data-edit="${p.id}">Edit</button></div>`).join("") || '<div class="empty">No members</div>'}
+          <div class="row" style="padding:6px 8px"><button class="btn sm danger" data-team-del="${t.id}">Delete team</button></div>
+        </div></details>`;
+    }).join("") : `<div class="empty">${teams.length ? "No matches" : 'No teams yet – <a href="#/import">import a CSV</a>.'}</div>`;
+  };
+  draw();
+  $("#q").oninput = draw;
+  $("#filter").onchange = draw;
+
+  const findP = (id) => { for (const t of teams) for (const p of t.participants) if (p.id === id) return [p, t]; return []; };
+  $("#list").onclick = async (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    e.preventDefault();
+    if (b.dataset.qr) { const [p, t] = findP(Number(b.dataset.qr)); showQr(p, t.name); }
+    if (b.dataset.edit) { const [p, t] = findP(Number(b.dataset.edit)); editParticipant({ ...p, team_id: t.id }, teams); }
+    if (b.dataset.teamEdit) {
+      const t = teams.find((x) => x.id === Number(b.dataset.teamEdit));
+      const name = prompt("Team name", t.name);
+      if (name && name.trim() !== t.name) {
+        try { must(await sb.from("teams").update({ name: name.trim() }).eq("id", t.id)); route(); } catch (er) { toast(er.message, "bad"); }
+      }
+    }
+    if (b.dataset.teamDel) {
+      const t = teams.find((x) => x.id === Number(b.dataset.teamDel));
+      if (!(await confirmBox(`Delete team <b>${esc(t.name)}</b> and its ${t.participants.length} member(s)?`, "Delete", true))) return;
+      try { must(await sb.from("teams").delete().eq("id", t.id)); toast("Team deleted"); route(); } catch (er) { toast(er.message, "bad"); }
+    }
+  };
+  $("#add-team").onclick = async () => {
+    const name = prompt("New team name");
+    if (!name?.trim()) return;
+    try { must(await sb.from("teams").insert({ name: name.trim() })); toast("Team created – now add participants", "ok"); route(); }
+    catch (er) { toast(er.message.includes("teams_name_key") ? "A team with that name exists" : er.message, "bad"); }
+  };
+  $("#add-p").onclick = () => editParticipant({ name: "", email: "", phone: "", team_id: teams[0]?.id }, teams);
+  $("#exp").onclick = () => download("participants_qr.csv", toCSV([
+    ["Team", "Name", "Email", "Phone", "Leader", "QR code", "Email status"],
+    ...teams.flatMap((t) => t.participants.map((p) => [t.name, p.name, p.email, p.phone, p.is_leader ? "yes" : "", p.token, p.email_status])),
+  ]));
+}
+
+async function viewPrint(main) {
+  const teams = await getTeams();
+  main.innerHTML = `
+    <div class="page-head no-print"><div><h1>Print badges</h1><p class="muted">One QR per participant, grouped by team. Use your browser's print (Ctrl+P).</p></div>
+      <div class="row"><a class="btn" href="#/teams">Back</a><button class="btn primary" onclick="print()">Print</button></div></div>
+    <div class="badges">${teams.flatMap((t) => t.participants.map((p) => `
+      <div class="badge-card">${qrSvg(p.token)}<div class="n">${esc(p.name)}</div><div class="t">${esc(t.name)}</div><div class="t code">${esc(p.token)}</div></div>`)).join("")}</div>`;
+}
+
+// ------------------------------------------------------------------ checkpoints
+function editCheckpoint(c) {
+  const isNew = !c.id;
+  const crit = c.criteria?.length ? c.criteria : [{ name: "Innovation", max: 10 }, { name: "Impact on SDGs", max: 10 }, { name: "Technical execution", max: 10 }, { name: "Presentation", max: 10 }];
+  modal(`
+    <h2>${isNew ? "New checkpoint" : "Edit checkpoint"}</h2>
+    <form id="cf">
+      <div class="field"><label>Name</label><input name="name" required value="${esc(c.name)}" placeholder="e.g. Check-in, Lunch Day 1, Round 1 Judging"></div>
+      <div class="field"><label>What happens here?</label>
+        <label class="check"><input type="radio" name="type" value="scan" ${c.type !== "judging" ? "checked" : ""}> <span><b>QR scan</b> – volunteers scan each participant (check-in, meals, swag…)</span></label>
+        <label class="check"><input type="radio" name="type" value="judging" ${c.type === "judging" ? "checked" : ""}> <span><b>Judging</b> – mentors grade each team against criteria</span></label></div>
+      <div class="field"><label>Description (optional)</label><input name="description" value="${esc(c.description)}"></div>
+      <div class="field" id="crit-wrap"><label>Grading criteria</label><div id="crit"></div>
+        <button type="button" class="btn sm" id="add-crit">+ Criterion</button></div>
+      <div class="row"><div class="grow"><label>Order</label><input name="sort_order" type="number" value="${c.sort_order ?? 0}"></div>
+        <label class="check" style="margin-top:20px"><input type="checkbox" name="active" ${c.active !== false ? "checked" : ""}> Open (can be scanned / graded now)</label></div>
+      <div class="actions">${isNew ? "" : '<button type="button" class="btn danger" id="c-del">Delete</button>'}
+        <button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+    </form>`, (m, close) => {
+    const critEl = $("#crit", m);
+    const addRow = (x = { name: "", max: 10 }) => {
+      const d = document.createElement("div");
+      d.className = "row"; d.style.marginBottom = "6px";
+      d.innerHTML = `<input class="grow" data-cn placeholder="Criterion" value="${esc(x.name)}"><input type="number" data-cm min="1" style="width:80px" value="${x.max}" title="Max score"><button type="button" class="btn sm danger">✕</button>`;
+      $("button", d).onclick = () => d.remove();
+      critEl.appendChild(d);
+    };
+    crit.forEach(addRow);
+    $("#add-crit", m).onclick = () => addRow();
+    const sync = () => ($("#crit-wrap", m).style.display = $('input[name=type]:checked', m).value === "judging" ? "" : "none");
+    $$('input[name=type]', m).forEach((r) => (r.onchange = sync));
+    sync();
+    $("#cf", m).onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const type = f.get("type");
+      const criteria = type === "judging"
+        ? $$(".row", critEl).map((r) => ({ name: $("[data-cn]", r).value.trim(), max: Number($("[data-cm]", r).value) || 10 })).filter((x) => x.name)
+        : [];
+      if (type === "judging" && !criteria.length) return toast("Add at least one grading criterion", "bad");
+      const row = { name: f.get("name").trim(), type, description: f.get("description").trim() || null, criteria, sort_order: Number(f.get("sort_order")) || 0, active: f.get("active") === "on" };
+      try {
+        must(isNew ? await sb.from("checkpoints").insert(row) : await sb.from("checkpoints").update(row).eq("id", c.id));
+        toast("Checkpoint saved", "ok"); close(); route();
+      } catch (er) { toast(er.message, "bad"); }
+    };
+    if (!isNew) $("#c-del", m).onclick = async () => {
+      if (!(await confirmBox(`Delete <b>${esc(c.name)}</b>? All its scans/scores are deleted.`, "Delete", true))) return;
+      try { must(await sb.from("checkpoints").delete().eq("id", c.id)); toast("Deleted"); close(); route(); } catch (er) { toast(er.message, "bad"); }
+    };
+  });
+}
+
+async function viewCheckpoints(main) {
+  const cps = await getCheckpoints();
+  const row = (c) => `<tr>
+    <td><b>${esc(c.name)}</b>${c.description ? `<br><span class="small muted">${esc(c.description)}</span>` : ""}</td>
+    <td>${c.type === "scan" ? '<span class="badge info">QR scan · volunteers</span>' : '<span class="badge warn">Judging · mentors</span>'}</td>
+    <td class="small">${c.type === "judging" ? c.criteria.map((x) => `${esc(x.name)} (${x.max})`).join(", ") : "—"}</td>
+    <td><button class="btn sm" data-toggle="${c.id}">${c.active ? "✓ Open" : "Closed"}</button></td>
+    <td><button class="btn sm" data-edit="${c.id}">Edit</button></td></tr>`;
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Checkpoints</h1><p class="muted">Mark each checkpoint as a <b>QR scan</b> (volunteers) or <b>judging</b> round (mentors grade teams).</p></div>
+      <button class="btn primary" id="new">+ New checkpoint</button></div>
+    <div class="card">${cps.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Criteria (max)</th><th>Status</th><th></th></tr></thead>
+      <tbody>${cps.map(row).join("")}</tbody></table></div>` : `<div class="empty">No checkpoints yet.<br><br>
+      <button class="btn" id="quick">Add suggested set: Check-in, Lunch, Dinner, Final judging</button></div>`}</div>`;
+  $("#new").onclick = () => editCheckpoint({ type: "scan", sort_order: cps.length + 1 });
+  $(".card").onclick = async (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    if (b.dataset.edit) editCheckpoint(cps.find((c) => c.id === Number(b.dataset.edit)));
+    if (b.dataset.toggle) {
+      const c = cps.find((x) => x.id === Number(b.dataset.toggle));
+      try { must(await sb.from("checkpoints").update({ active: !c.active }).eq("id", c.id)); route(); } catch (er) { toast(er.message, "bad"); }
+    }
+    if (b.id === "quick") {
+      try {
+        must(await sb.from("checkpoints").insert([
+          { name: "Check-in", type: "scan", sort_order: 1 },
+          { name: "Lunch", type: "scan", sort_order: 2 },
+          { name: "Dinner", type: "scan", sort_order: 3 },
+          { name: "Final judging", type: "judging", sort_order: 4, criteria: [{ name: "Innovation", max: 10 }, { name: "Impact on SDGs", max: 10 }, { name: "Technical execution", max: 10 }, { name: "Presentation", max: 10 }] },
+        ]));
+        route();
+      } catch (er) { toast(er.message, "bad"); }
+    }
+  };
+}
+
+// ------------------------------------------------------------------ staff
+function showCredentials(list) {
+  modal(`<h2>Login details</h2>
+    <p class="small muted">Share these if the email didn't go through. Passwords are shown only once.</p>
+    <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Password</th><th>Mail</th></tr></thead><tbody>
+    ${list.map((x) => `<tr><td>${esc(x.name)}</td><td>${esc(x.email)}</td><td>${x.password ? `<span class="pw">${esc(x.password)}</span>` : `<span class="badge bad">${esc(x.error)}</span>`}</td>
+      <td>${x.mailed ? '<span class="badge ok">Sent</span>' : x.mailError ? `<span class="badge bad" title="${esc(x.mailError)}">Failed</span>` : "—"}</td></tr>`).join("")}
+    </tbody></table></div>
+    <div class="actions"><button class="btn" id="cp">Copy all</button><button class="btn primary" data-close>Done</button></div>`, (m) => {
+    $("#cp", m).onclick = () => {
+      navigator.clipboard.writeText(list.filter((x) => x.password).map((x) => `${x.name} – ${x.email} – ${x.password}`).join("\n"));
+      toast("Copied");
+    };
+  });
+}
+
+async function viewStaff(main) {
+  const staff = must(await sb.from("staff").select("*").order("role").order("name"));
+  const roleLabel = { admin: "Admin", volunteer: "Volunteer (scans QR)", mentor: "Mentor / judge" };
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Staff</h1><p class="muted">Admins manage everything · Volunteers scan QR codes · Mentors grade teams</p></div></div>
+    <div class="grid two">
+      <form class="card" id="one">
+        <h2>Add one person</h2>
+        <div class="field"><label>Name</label><input name="name" required></div>
+        <div class="field"><label>Email</label><input name="email" type="email" required></div>
+        <div class="field"><label>Role</label><select name="role"><option value="volunteer">Volunteer (scans QR)</option><option value="mentor">Mentor / judge</option><option value="admin">Admin</option></select></div>
+        <label class="check"><input type="checkbox" name="notify" checked> Email them their login details</label>
+        <div style="margin-top:12px"><button class="btn primary">Add</button></div>
+      </form>
+      <form class="card" id="bulk">
+        <h2>Add many</h2>
+        <p class="small muted" style="margin-top:0">One per line: <code>name, email, role</code> (role = admin / volunteer / mentor)</p>
+        <textarea name="lines" placeholder="Priya S, priya@example.com, volunteer&#10;Dr. Rao, rao@example.com, mentor"></textarea>
+        <label class="check" style="margin-top:8px"><input type="checkbox" name="notify" checked> Email them their login details</label>
+        <div style="margin-top:12px"><button class="btn primary">Add all</button> <span class="small muted" id="bulk-st"></span></div>
+      </form>
+    </div>
+    <div class="card" id="staff-list"><h2>Current staff (${staff.length})</h2><div class="table-wrap"><table>
+      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th></th></tr></thead><tbody>
+      ${staff.map((s) => `<tr><td><b>${esc(s.name)}</b></td><td>${esc(s.email)}</td>
+        <td><select data-role="${esc(s.email)}" style="width:auto" ${s.email === state.me.email ? "disabled" : ""}>${Object.entries(roleLabel).map(([k, v]) => `<option value="${k}" ${k === s.role ? "selected" : ""}>${v}</option>`).join("")}</select></td>
+        <td class="row"><button class="btn sm" data-reset="${esc(s.email)}">Reset password</button>
+          ${s.email === state.me.email ? "" : `<button class="btn sm danger" data-del="${esc(s.email)}">Remove</button>`}</td></tr>`).join("")}
+      </tbody></table></div></div>`;
+
+  const create = async (name, email, role, notify) => {
+    try {
+      const r = await callAdmin({ action: "create_staff", name, email, role, notify });
+      return { name, email, ...r };
+    } catch (e) { return { name, email, error: e.message }; }
+  };
+  $("#one").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const b = $("button", e.target); b.disabled = true;
+    const r = await create(f.get("name").trim(), f.get("email").trim().toLowerCase(), f.get("role"), f.get("notify") === "on");
+    b.disabled = false;
+    if (r.error) return toast(r.error, "bad");
+    showCredentials([r]);
+    route();
+  };
+  $("#bulk").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const lines = f.get("lines").split(/\n/).map((l) => l.split(/[,\t;]/).map((x) => x.trim())).filter((x) => x[0] || x[1]);
+    const bad = lines.filter((l) => !l[1]?.includes("@") || !["admin", "volunteer", "mentor"].includes((l[2] || "").toLowerCase()));
+    if (bad.length) return toast(`Check line: "${bad[0].join(", ")}" – needs name, email, role`, "bad");
+    const out = [];
+    for (const [i, l] of lines.entries()) {
+      $("#bulk-st").textContent = `${i + 1} / ${lines.length}…`;
+      out.push(await create(l[0], l[1].toLowerCase(), l[2].toLowerCase(), f.get("notify") === "on"));
+    }
+    $("#bulk-st").textContent = "";
+    showCredentials(out);
+    route();
+  };
+  $("#staff-list").onclick = async (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    if (b.dataset.reset) {
+      const notify = await confirmBox(`Generate a new password for ${esc(b.dataset.reset)} and email it to them?`, "Reset & email");
+      if (!notify) return;
+      try { const r = await callAdmin({ action: "reset_password", email: b.dataset.reset, notify: true }); showCredentials([{ name: "", email: b.dataset.reset, ...r }]); }
+      catch (er) { toast(er.message, "bad"); }
+    }
+    if (b.dataset.del) {
+      if (!(await confirmBox(`Remove ${esc(b.dataset.del)}? Their login is deleted.`, "Remove", true))) return;
+      try { await callAdmin({ action: "delete_staff", email: b.dataset.del }); toast("Removed"); route(); } catch (er) { toast(er.message, "bad"); }
+    }
+  };
+  $$("select[data-role]").forEach((s) => (s.onchange = async () => {
+    try { must(await sb.from("staff").update({ role: s.value }).eq("email", s.dataset.role)); toast("Role updated", "ok"); } catch (er) { toast(er.message, "bad"); }
+  }));
+}
+
+// ------------------------------------------------------------------ emails
+const mailJob = { running: false, cancel: false };
+
+async function viewEmails(main) {
+  const parts = await getParticipants();
+  const withEmail = parts.filter((p) => p.email);
+  const pending = withEmail.filter((p) => p.email_status === "pending");
+  const failed = withEmail.filter((p) => p.email_status === "failed");
+  const sent = withEmail.filter((p) => p.email_status === "sent");
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Send QR emails</h1><p class="muted">Each participant gets their own QR code by email (inline image + attachment).</p></div></div>
+    <div class="grid stats" style="margin-bottom:16px">
+      <div class="stat"><div class="v">${sent.length}</div><div class="l">Sent</div></div>
+      <div class="stat"><div class="v">${pending.length}</div><div class="l">Not sent yet</div></div>
+      <div class="stat"><div class="v">${failed.length}</div><div class="l">Failed</div></div>
+      <div class="stat"><div class="v">${parts.length - withEmail.length}</div><div class="l">No email address</div></div>
+    </div>
+    <div class="card">
+      <div class="row">
+        <button class="btn primary lg" data-send="pending" ${pending.length ? "" : "disabled"}>✉ Send to everyone not yet mailed (${pending.length})</button>
+        <button class="btn" data-send="failed" ${failed.length ? "" : "disabled"}>Retry failed (${failed.length})</button>
+        <button class="btn" data-send="all" ${withEmail.length ? "" : "disabled"}>Resend to all (${withEmail.length})</button>
+        <button class="btn" id="test">Send test email to me</button>
+      </div>
+      <div id="job" style="margin-top:16px;display:none">
+        <div class="progress"><div id="bar"></div></div>
+        <div class="row" style="justify-content:space-between;margin-top:6px"><span class="small" id="job-st"></span><button class="btn sm danger" id="stop">Stop</button></div>
+      </div>
+      <p class="small muted" style="margin-bottom:0">Emails go out in small batches from the Gmail account configured on the server. Gmail allows ~2,000/day for Workspace accounts (500 for personal),
+        so all ${withEmail.length} fit in one go. You can close this tab and come back – progress is saved per person; just click "Send to everyone not yet mailed" again.
+        Edit the subject/message under <a href="#/settings">Settings</a>.</p>
+    </div>
+    ${failed.length ? `<div class="card"><h2>Failed</h2><div class="table-wrap"><table><thead><tr><th>Name</th><th>Team</th><th>Email</th><th>Error</th></tr></thead><tbody>
+      ${failed.map((p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.teams?.name)}</td><td>${esc(p.email)}</td><td class="small muted">${esc(p.email_error)}</td></tr>`).join("")}</tbody></table></div></div>` : ""}`;
+
+  $("#test").onclick = async (e) => {
+    e.target.disabled = true;
+    try { await callAdmin({ action: "test_email", to: state.me.email }); toast(`Test email sent to ${state.me.email}`, "ok"); }
+    catch (er) { toast(`Email not working: ${er.message}`, "bad"); }
+    e.target.disabled = false;
+  };
+  $("#stop").onclick = () => { mailJob.cancel = true; $("#job-st").textContent = "Stopping after this batch…"; };
+
+  $$("[data-send]").forEach((b) => (b.onclick = async () => {
+    const list = { pending, failed, all: withEmail }[b.dataset.send];
+    if (!(await confirmBox(`Send QR emails to <b>${list.length}</b> participant(s)?`, "Send now"))) return;
+    if (mailJob.running) return toast("Already sending", "bad");
+    Object.assign(mailJob, { running: true, cancel: false });
+    $$("[data-send], #test").forEach((x) => (x.disabled = true));
+    $("#job").style.display = "";
+    let ok = 0, bad = 0;
+    const BATCH = 8;
+    for (let i = 0; i < list.length && !mailJob.cancel; i += BATCH) {
+      const ids = list.slice(i, i + BATCH).map((p) => p.id);
+      try {
+        const { results } = await callAdmin({ action: "send_qr", ids });
+        results.forEach((r) => (r.ok ? ok++ : bad++));
+      } catch (er) {
+        bad += ids.length;
+        toast(er.message, "bad");
+        if (/admins only|not signed in|smtp|auth|invalid login/i.test(er.message)) break;
+        await sleep(3000);
+      }
+      const done = Math.min(i + BATCH, list.length);
+      if ($("#bar")) {
+        $("#bar").style.width = `${(done / list.length) * 100}%`;
+        $("#job-st").textContent = `${done} / ${list.length} processed · ${ok} sent · ${bad} failed`;
+      }
+    }
+    mailJob.running = false;
+    toast(`Done: ${ok} sent, ${bad} failed`, bad ? "bad" : "ok");
+    if (location.hash.startsWith("#/emails")) route();
+  }));
+}
+
+// ------------------------------------------------------------------ scanning
+async function stopScanner() {
+  if (state.scanner) {
+    try { await state.scanner.stop(); } catch { /* already stopped */ }
+    try { state.scanner.clear(); } catch { /* ignore */ }
+    state.scanner = null;
+  }
+}
+
+async function startScanner(onCode) {
+  await stopScanner();
+  const scanner = new window.Html5Qrcode("reader", { formatsToSupport: [window.Html5QrcodeSupportedFormats.QR_CODE], verbose: false });
+  state.scanner = scanner;
+  let last = "", lastAt = 0, busy = false;
+  await scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: (w, h) => { const s = Math.floor(Math.min(w, h) * 0.7); return { width: s, height: s }; } },
+    async (text) => {
+      const now = Date.now();
+      if (busy || (text === last && now - lastAt < 4000)) return;
+      last = text; lastAt = now; busy = true;
+      try { await onCode(text); } finally { busy = false; }
+    }, () => {});
+}
+
+async function viewScan(main, cpId) {
+  const cps = (await getCheckpoints()).filter((c) => c.type === "scan");
+  const open = cps.filter((c) => c.active);
+  if (!open.length) {
+    main.innerHTML = `<h1>Scan</h1><div class="card empty">No open QR-scan checkpoints.${state.me.role === "admin" ? ' <a href="#/checkpoints">Create or open one</a>.' : " Ask an admin to open one."}</div>`;
+    return;
+  }
+  const cp = open.find((c) => c.id === Number(cpId)) || open.find((c) => c.id === Number(localStorage.getItem("cp"))) || open[0];
+  localStorage.setItem("cp", cp.id);
+  const { count: total } = await sb.from("participants").select("id", { count: "exact", head: true });
+  let { count: done } = await sb.from("scans").select("id", { count: "exact", head: true }).eq("checkpoint_id", cp.id);
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Scan</h1></div>
+      <select id="cp" style="width:auto;min-width:200px">${open.map((c) => `<option value="${c.id}" ${c.id === cp.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></div>
+    <div class="scan-layout">
+      <div>
+        <div id="reader"></div>
+        <div class="row" style="margin-top:10px"><button class="btn" id="cam">Start camera</button><span class="small muted" id="cam-st"></span></div>
+      </div>
+      <div>
+        <div class="result" id="res"><div><div class="big" style="color:var(--muted)">Ready</div><div class="sub muted">Point the camera at a participant's QR</div></div></div>
+        <div class="card" style="margin-top:12px">
+          <div class="row" style="justify-content:space-between"><b>${esc(cp.name)}</b><span><b id="done">${done}</b> / ${total} scanned</span></div>
+          <div class="progress" style="margin-top:6px"><div id="bar" style="width:${total ? (done / total) * 100 : 0}%"></div></div>
+        </div>
+        <div class="card"><h3>Manual entry</h3><p class="small muted" style="margin-top:0">No QR? Search by name, email or pass code.</p>
+          <input id="ms" placeholder="Search…"><div id="ms-res"></div></div>
+        <div class="card"><h3>Recent at this checkpoint</h3><div id="recent" class="small"></div></div>
+      </div>
+    </div>`;
+  $("#cp").onchange = (e) => (location.hash = `#/scan/${e.target.value}`);
+
+  const recent = async () => {
+    const rows = must(await sb.from("scans").select("scanned_at,scanner_name,participants(name,teams(name))").eq("checkpoint_id", cp.id).order("scanned_at", { ascending: false }).limit(8));
+    if ($("#recent")) $("#recent").innerHTML = rows.map((r) => `<div class="row" style="justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--line)">
+      <span><b>${esc(r.participants?.name)}</b> <span class="muted">${esc(r.participants?.teams?.name)}</span></span><span class="muted">${fmtTime(r.scanned_at)}</span></div>`).join("") || '<span class="muted">None yet</span>';
+  };
+  recent();
+
+  const show = (kind, title, sub) => {
+    $("#res").className = `result ${kind}`;
+    $("#res").innerHTML = `<div><div class="big">${title}</div><div class="sub">${sub || ""}</div></div>`;
+  };
+  const handle = async (code) => {
+    show("", "Checking…", "");
+    try {
+      const r = must(await sb.rpc("scan_participant", { p_checkpoint: cp.id, p_code: code }));
+      if (r.status === "ok") {
+        beep(true);
+        done++;
+        $("#done").textContent = done;
+        $("#bar").style.width = `${(done / total) * 100}%`;
+        show("ok", `✓ ${esc(r.participant.name)}`, `Team <b>${esc(r.team.name)}</b> · ${r.team_checked}/${r.team_size} of team scanned here`);
+        recent();
+      } else if (r.status === "duplicate") {
+        beep(false);
+        show("dup", `Already scanned – ${esc(r.participant.name)}`, `Team ${esc(r.team.name)} · ${fmtTime(r.scanned_at)}${r.scanned_by ? " by " + esc(r.scanned_by) : ""}`);
+      } else {
+        beep(false);
+        show("bad", "✕ " + esc(r.message), "");
+      }
+    } catch (e) { beep(false); show("bad", "Error", esc(e.message)); }
+  };
+
+  $("#cam").onclick = async () => {
+    if (state.scanner) { await stopScanner(); $("#cam").textContent = "Start camera"; return; }
+    try {
+      $("#cam-st").textContent = "Starting…";
+      await startScanner(handle);
+      $("#cam").textContent = "Stop camera";
+      $("#cam-st").textContent = "";
+    } catch (e) {
+      $("#cam-st").textContent = `Camera unavailable: ${e?.message || e}. The site must be opened over https.`;
+    }
+  };
+  $("#cam").click();
+
+  let t;
+  $("#ms").oninput = () => {
+    clearTimeout(t);
+    t = setTimeout(async () => {
+      const q = $("#ms").value.trim().replace(/[,%()]/g, " ");
+      if (q.length < 2) { $("#ms-res").innerHTML = ""; return; }
+      const rows = must(await sb.from("participants").select("id,name,email,token,teams(name)")
+        .or(`name.ilike.%${q}%,email.ilike.%${q}%,token.ilike.%${q}%`).limit(8));
+      $("#ms-res").innerHTML = rows.map((p) => `<div class="member"><div class="who"><b>${esc(p.name)}</b><br><span class="small muted">${esc(p.teams?.name)} · ${esc(p.email || "")}</span></div>
+        <button class="btn sm primary" data-tok="${esc(p.token)}">Mark</button></div>`).join("") || '<div class="small muted" style="padding:8px">No match</div>';
+    }, 250);
+  };
+  $("#ms-res").onclick = (e) => { const b = e.target.closest("[data-tok]"); if (b) handle(b.dataset.tok); };
+}
+
+// ------------------------------------------------------------------ judging
+async function viewJudge(main, cpId, teamId) {
+  const cps = (await getCheckpoints()).filter((c) => c.type === "judging" && c.active);
+  if (!cps.length) {
+    main.innerHTML = `<h1>Judging</h1><div class="card empty">No judging rounds are open.${state.me.role === "admin" ? ' <a href="#/checkpoints">Create one</a>.' : " Ask an admin to open one."}</div>`;
+    return;
+  }
+  const cp = cps.find((c) => c.id === Number(cpId)) || cps[0];
+  if (teamId) return judgeTeam(main, cp, Number(teamId));
+
+  const [teams, mine] = await Promise.all([
+    sb.from("teams").select("id,name,participants(count)").order("name").then(must),
+    sb.from("scores").select("team_id,total").eq("checkpoint_id", cp.id).eq("judge_id", state.user.id).then(must),
+  ]);
+  const scored = new Map(mine.map((s) => [s.team_id, s.total]));
+  const max = cp.criteria.reduce((n, c) => n + Number(c.max), 0);
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Judging</h1><p class="muted">You've graded ${scored.size} of ${teams.length} teams</p></div>
+      <select id="cp" style="width:auto;min-width:200px">${cps.map((c) => `<option value="${c.id}" ${c.id === cp.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></div>
+    <div class="scan-layout">
+      <div class="card"><h3>Scan any team member's QR</h3><div id="reader"></div>
+        <div class="row" style="margin-top:10px"><button class="btn" id="cam">Start camera</button><span class="small muted" id="cam-st"></span></div></div>
+      <div class="card"><div class="row" style="margin-bottom:10px"><h3 style="margin:0;flex:1">Or pick a team</h3><input id="q" placeholder="Filter…" style="max-width:200px"></div>
+        <div class="team-pick" id="tp"></div></div>
+    </div>`;
+  const draw = () => {
+    const q = $("#q").value.toLowerCase();
+    $("#tp").innerHTML = teams.filter((t) => t.name.toLowerCase().includes(q)).map((t) => `<button class="btn" data-t="${t.id}" style="justify-content:space-between">
+      <span>${esc(t.name)}</span>${scored.has(t.id) ? `<span class="badge ok">${scored.get(t.id)}/${max}</span>` : '<span class="badge">—</span>'}</button>`).join("");
+  };
+  draw();
+  $("#q").oninput = draw;
+  $("#tp").onclick = (e) => { const b = e.target.closest("[data-t]"); if (b) location.hash = `#/judge/${cp.id}/${b.dataset.t}`; };
+  $("#cp").onchange = (e) => (location.hash = `#/judge/${e.target.value}`);
+  $("#cam").onclick = async () => {
+    if (state.scanner) { await stopScanner(); $("#cam").textContent = "Start camera"; return; }
+    try {
+      await startScanner(async (code) => {
+        const tok = code.toUpperCase().replace(/[^A-Z0-9]/g, "");
+        const { data } = await sb.from("participants").select("team_id").eq("token", tok).maybeSingle();
+        if (!data) { beep(false); toast("QR not recognised", "bad"); return; }
+        beep(true);
+        location.hash = `#/judge/${cp.id}/${data.team_id}`;
+      });
+      $("#cam").textContent = "Stop camera";
+    } catch (e) { $("#cam-st").textContent = `Camera unavailable: ${e?.message || e}`; }
+  };
+}
+
+async function judgeTeam(main, cp, teamId) {
+  const [team, existing] = await Promise.all([
+    sb.from("teams").select("id,name,participants(name,is_leader)").eq("id", teamId).single().then(must),
+    sb.from("scores").select("*").eq("checkpoint_id", cp.id).eq("team_id", teamId).eq("judge_id", state.user.id).maybeSingle().then(must),
+  ]);
+  const vals = existing?.scores || {};
+  const max = cp.criteria.reduce((n, c) => n + Number(c.max), 0);
+  main.innerHTML = `
+    <div class="page-head"><div><a href="#/judge/${cp.id}" class="small">← All teams</a><h1>${esc(team.name)}</h1>
+      <p class="muted">${esc(cp.name)} · ${team.participants.map((p) => esc(p.name) + (p.is_leader ? " (lead)" : "")).join(", ")}</p></div></div>
+    <form class="card" id="sf" style="max-width:640px">
+      ${cp.criteria.map((c, i) => `<div class="crit"><div><label>${esc(c.name)} <span class="muted">/ ${c.max}</span></label>
+        <input type="range" min="0" max="${c.max}" step="0.5" value="${vals[c.name] ?? 0}" data-i="${i}"></div>
+        <input type="number" min="0" max="${c.max}" step="0.5" value="${vals[c.name] ?? 0}" data-n="${i}"></div>`).join("")}
+      <div class="row" style="justify-content:space-between;margin:14px 0"><b>Total</b><span style="font-size:1.4rem;font-weight:700"><span id="tot">0</span> / ${max}</span></div>
+      <div class="field"><label>Comments / feedback</label><textarea name="comments">${esc(existing?.comments)}</textarea></div>
+      <div class="row"><button class="btn primary lg">${existing ? "Update score" : "Submit score"}</button>
+        ${existing ? `<span class="small muted">Last saved ${fmtTime(existing.updated_at)}</span>` : ""}</div>
+    </form>`;
+  const sync = () => {
+    let t = 0;
+    cp.criteria.forEach((c, i) => (t += Number($(`[data-n="${i}"]`).value) || 0));
+    $("#tot").textContent = Math.round(t * 10) / 10;
+  };
+  $$("[data-i]").forEach((r) => (r.oninput = () => { $(`[data-n="${r.dataset.i}"]`).value = r.value; sync(); }));
+  $$("[data-n]").forEach((n) => (n.oninput = () => {
+    const c = cp.criteria[n.dataset.n];
+    if (Number(n.value) > c.max) n.value = c.max;
+    $(`[data-i="${n.dataset.n}"]`).value = n.value; sync();
+  }));
+  sync();
+  $("#sf").onsubmit = async (e) => {
+    e.preventDefault();
+    const scores = {};
+    let total = 0;
+    cp.criteria.forEach((c, i) => { const v = Math.min(Number($(`[data-n="${i}"]`).value) || 0, c.max); scores[c.name] = v; total += v; });
+    try {
+      must(await sb.from("scores").upsert({
+        checkpoint_id: cp.id, team_id: teamId, judge_id: state.user.id, judge_name: state.me.name,
+        scores, total, comments: new FormData(e.target).get("comments").trim() || null, updated_at: new Date().toISOString(),
+      }, { onConflict: "checkpoint_id,team_id,judge_id" }));
+      toast(`Saved ${team.name}: ${total}/${max}`, "ok");
+      location.hash = `#/judge/${cp.id}`;
+    } catch (er) { toast(er.message, "bad"); }
+  };
+}
+
+// ------------------------------------------------------------------ results
+async function viewResults(main, cpId) {
+  const cps = await getCheckpoints();
+  const judging = cps.filter((c) => c.type === "judging");
+  const scanCps = cps.filter((c) => c.type === "scan");
+  const cp = judging.find((c) => c.id === Number(cpId)) || judging[0];
+  const [teams, scores] = await Promise.all([
+    sb.from("teams").select("id,name").order("name").then(must),
+    cp ? sb.from("scores").select("*").eq("checkpoint_id", cp.id).then(must) : [],
+  ]);
+  let board = "";
+  if (cp) {
+    const max = cp.criteria.reduce((n, c) => n + Number(c.max), 0);
+    const rows = teams.map((t) => {
+      const s = scores.filter((x) => x.team_id === t.id);
+      const avg = s.length ? s.reduce((n, x) => n + Number(x.total), 0) / s.length : null;
+      const per = cp.criteria.map((c) => (s.length ? s.reduce((n, x) => n + Number(x.scores?.[c.name] || 0), 0) / s.length : null));
+      return { t, s, avg, per };
+    }).sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1));
+    board = `<div class="table-wrap"><table><thead><tr><th>#</th><th>Team</th><th>Avg total / ${max}</th><th>Judges</th>
+      ${cp.criteria.map((c) => `<th>${esc(c.name)}</th>`).join("")}<th></th></tr></thead><tbody>
+      ${rows.map((r, i) => `<tr><td>${r.avg == null ? "" : i + 1}</td><td><b>${esc(r.t.name)}</b></td>
+        <td>${r.avg == null ? '<span class="muted">not graded</span>' : `<b>${r.avg.toFixed(2)}</b>`}</td><td>${r.s.length}</td>
+        ${r.per.map((v) => `<td>${v == null ? "" : v.toFixed(1)}</td>`).join("")}
+        <td>${r.s.length ? `<button class="btn sm" data-detail="${r.t.id}">Details</button>` : ""}</td></tr>`).join("")}
+      </tbody></table></div>`;
+    main._rows = rows;
+  }
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Results</h1><p class="muted">Leaderboard is the average of all judges' totals.</p></div>
+      <div class="row">${judging.length ? `<select id="cp" style="width:auto">${judging.map((c) => `<option value="${c.id}" ${c.id === cp?.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>
+      <button class="btn" id="exp-scores">Export scores CSV</button>` : ""}<button class="btn" id="exp-att">Export attendance CSV</button></div></div>
+    <div class="card"><h2>${cp ? esc(cp.name) : "Leaderboard"}</h2>${cp ? board : '<div class="empty">No judging checkpoints yet.</div>'}</div>
+    <div class="card"><h2>Attendance</h2><div id="att" class="small muted">Loading…</div></div>`;
+
+  $("#cp") && ($("#cp").onchange = (e) => (location.hash = `#/results/${e.target.value}`));
+  main.querySelector(".card").onclick = (e) => {
+    const b = e.target.closest("[data-detail]");
+    if (!b) return;
+    const r = main._rows.find((x) => x.t.id === Number(b.dataset.detail));
+    modal(`<h2>${esc(r.t.name)}</h2>${r.s.map((s) => `<div class="card"><div class="row" style="justify-content:space-between"><b>${esc(s.judge_name || "Judge")}</b><b>${s.total}</b></div>
+      <div class="small muted">${cp.criteria.map((c) => `${esc(c.name)}: ${s.scores?.[c.name] ?? 0}/${c.max}`).join(" · ")}</div>
+      ${s.comments ? `<p class="small" style="margin-bottom:0">${esc(s.comments)}</p>` : ""}</div>`).join("")}
+      <div class="actions"><button class="btn primary" data-close>Close</button></div>`);
+  };
+  $("#exp-scores") && ($("#exp-scores").onclick = () => download(`scores_${cp.name.replace(/\W+/g, "_")}.csv`, toCSV([
+    ["Team", "Judge", ...cp.criteria.map((c) => `${c.name} (/${c.max})`), "Total", "Comments", "Updated"],
+    ...scores.map((s) => [teams.find((t) => t.id === s.team_id)?.name, s.judge_name, ...cp.criteria.map((c) => s.scores?.[c.name] ?? 0), s.total, s.comments, s.updated_at]),
+  ])));
+
+  const [parts, scans] = await Promise.all([getParticipants(), sb.from("scans").select("checkpoint_id,participant_id,scanned_at").then(must)]);
+  const hit = new Map(scans.map((s) => [`${s.checkpoint_id}:${s.participant_id}`, s.scanned_at]));
+  $("#att").innerHTML = scanCps.length ? `<div class="table-wrap"><table><thead><tr><th>Checkpoint</th><th>Scanned</th><th>Missing</th></tr></thead><tbody>
+    ${scanCps.map((c) => {
+      const missing = parts.filter((p) => !hit.has(`${c.id}:${p.id}`));
+      return `<tr><td><b>${esc(c.name)}</b></td><td>${parts.length - missing.length} / ${parts.length}</td>
+        <td>${missing.length ? `<details><summary>${missing.length} people</summary>${missing.map((p) => `${esc(p.name)} <span class="muted">(${esc(p.teams?.name)})</span>`).join("<br>")}</details>` : "—"}</td></tr>`;
+    }).join("")}</tbody></table></div>` : "No scan checkpoints.";
+  $("#exp-att").onclick = () => download("attendance.csv", toCSV([
+    ["Team", "Name", "Email", "Code", ...scanCps.map((c) => c.name)],
+    ...parts.map((p) => [p.teams?.name, p.name, p.email, p.token, ...scanCps.map((c) => hit.get(`${c.id}:${p.id}`) || "")]),
+  ]));
+}
+
+// ------------------------------------------------------------------ settings & account
+async function viewSettings(main) {
+  await loadSettings();
+  const s = state.settings;
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Settings</h1></div></div>
+    <form class="card" id="sf" style="max-width:720px">
+      <div class="field"><label>Event name</label><input name="event_name" value="${esc(s.event_name)}"></div>
+      <div class="field"><label>QR email subject</label><input name="email_subject" value="${esc(s.email_subject)}"></div>
+      <div class="field"><label>QR email message</label><textarea name="email_message" style="min-height:180px">${esc(s.email_message)}</textarea>
+        <p class="small muted">Placeholders: <code>{{name}}</code> <code>{{team}}</code> <code>{{event}}</code> <code>{{code}}</code>. The QR image and pass code are added below the message automatically.</p></div>
+      <button class="btn primary">Save</button>
+    </form>`;
+  $("#sf").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      must(await sb.from("settings").upsert(["event_name", "email_subject", "email_message"].map((key) => ({ key, value: f.get(key) }))));
+      toast("Settings saved", "ok");
+      await loadSettings();
+      renderShell(); route();
+    } catch (er) { toast(er.message, "bad"); }
+  };
+}
+
+function viewAccount(main) {
+  main.innerHTML = `
+    <div class="page-head"><div><h1>My account</h1><p class="muted">${esc(state.me.name)} · ${esc(state.me.email)} · ${state.me.role}</p></div></div>
+    <form class="card" id="pw" style="max-width:420px"><h2>Change password</h2>
+      <div class="field"><label>New password</label><input type="password" name="p1" minlength="8" required autocomplete="new-password"></div>
+      <div class="field"><label>Repeat</label><input type="password" name="p2" minlength="8" required autocomplete="new-password"></div>
+      <button class="btn primary">Update password</button></form>`;
+  $("#pw").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    if (f.get("p1") !== f.get("p2")) return toast("Passwords don't match", "bad");
+    const { error } = await sb.auth.updateUser({ password: f.get("p1") });
+    if (error) return toast(error.message, "bad");
+    toast("Password updated", "ok");
+    e.target.reset();
+  };
+}
+
+boot();

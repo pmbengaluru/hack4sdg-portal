@@ -1,0 +1,9 @@
+{
+  "name": "hack4sdg-event-manager",
+  "private": true,
+  "type": "module",
+  "description": "QR passes, check-in scanning and judging for HACK4SDG (static site + Supabase)",
+  "scripts": {
+    "dev": "npx --yes http-server -p 5173 -c-1"
+  }
+}

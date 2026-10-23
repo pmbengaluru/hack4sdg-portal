@@ -1,0 +1,88 @@
+# HACK4SDG Event Portal
+
+QR entry passes, check-in scanning and team judging for the hackathon.
+
+- **Admins** import the registration CSV (members grouped under their team), view/print/download every participant's QR, email all QR codes in one click, add admins / volunteers / mentors, create checkpoints, and see results.
+- **Volunteers** scan participant QR codes at *scan* checkpoints (check-in, lunch, swag…). Duplicates are flagged, and there's a manual search fallback.
+- **Mentors / judges** scan any team member's QR (or pick the team) at *judging* checkpoints and grade the team against the criteria the admin set.
+
+Stack: a static site (GitHub Pages), Supabase (Postgres + Auth + row-level security), and one Supabase Edge Function (`admin`) that sends emails over Gmail SMTP and creates staff logins.
+
+```
+index.html, css/, js/       the web app (no build step)
+config.js                   Supabase URL + publishable key
+supabase/schema.sql         tables, security rules, scan/import functions
+supabase/functions/admin/   edge function: QR emails + staff accounts
+samples/                    example CSVs in both supported layouts
+```
+
+## One-time setup
+
+### 1. Database
+Supabase Dashboard → **SQL Editor** → paste all of `supabase/schema.sql` → **Run**.
+
+### 2. Auth settings
+Dashboard → **Authentication → Sign In / Providers**:
+- Email provider: **on**
+- **Allow new users to sign up: off** (only admins create logins from the portal)
+
+### 3. Gmail app password (for sending the QR emails)
+On the Google account that should send the emails (e.g. pm.bengaluru@aiesecmember.in):
+1. Turn on 2-Step Verification.
+2. Go to <https://myaccount.google.com/apppasswords>, create an app password named "HACK4SDG", and copy the 16 characters.
+   (If the option is missing, the Workspace admin has disabled app passwords. Use another Gmail account instead.)
+
+Gmail limits: about 2,000 emails/day on Workspace and 500/day on personal Gmail. All 398 fit in one go.
+
+### 4. Edge function
+**Option A: dashboard.** Go to **Edge Functions → Deploy a new function → Via editor**, name it `admin`, paste `supabase/functions/admin/index.ts`, and deploy. Then open the function's **Details** and turn **Enforce JWT verification off**. The function checks the signed-in admin itself.
+
+**Option B: CLI.**
+```bash
+npx supabase login
+```
+```bash
+npx supabase functions deploy admin --project-ref kokdabbyzhdlwhwfxopf --no-verify-jwt
+```
+
+Then go to **Edge Functions → Secrets** and add:
+
+| Name | Value |
+|---|---|
+| `SMTP_USER` | the Gmail address |
+| `SMTP_PASS` | the 16-character app password |
+| `SMTP_FROM` | e.g. `HACK4SDG <pm.bengaluru@aiesecmember.in>` |
+| `APP_URL` | the site URL from step 6 (added to staff login emails) |
+
+### 5. First admin
+1. **Authentication → Users → Add user → Create new user**: enter your email and a password, and tick *Auto confirm*.
+2. In the SQL Editor, run:
+   ```sql
+   insert into public.staff (email, name, role) values ('pm.bengaluru@aiesecmember.in', 'Your Name', 'admin')
+   on conflict (email) do update set role = 'admin';
+   ```
+You add everyone else from the portal's **Staff** page.
+
+### 6. Host the site
+Push this folder to GitHub. In the repository go to **Settings → Pages → Deploy from a branch → `main` / root**. The site is served at `https://<user>.github.io/<repo>/`.
+The camera scanner needs **https**, which GitHub Pages provides.
+
+## Using it on event day
+
+1. **Import CSV.** Upload the Google Form export. Two layouts are detected automatically:
+   - one row per team: `Team Name, Team Size, Team Leader Name, Team Leader Email, Member 2 Name, Member 2 Email, …`
+   - one row per person: `Team Name, Name, Email, Phone, Role`
+
+   The preview shows every team with its members, plus warnings for missing emails, team-size mismatches and duplicates, before anything is saved. Re-importing updates people (matched by email) and keeps their QR codes.
+2. **Checkpoints.** Create each one as a **QR scan** checkpoint (volunteers) or a **Judging** checkpoint (mentors, with grading criteria and max marks). Open or close them as the day goes on.
+3. **Staff.** Add admins, volunteers and mentors one at a time, or paste many as `name, email, role`. Their login details are emailed to them and also shown to you once.
+4. **Send QR emails.** Click **Send to everyone not yet mailed**. Progress is saved per person, so you can stop and resume. Failed sends can be retried.
+5. **Scan.** Volunteers open the site on their phone, pick the checkpoint and scan. A green screen means checked in; a yellow screen means already scanned (it shows when and by whom).
+6. **Judge.** Mentors scan any team member's QR, enter scores and comments, and save. They can edit their own scores later.
+7. **Results.** The leaderboard shows each team's average across judges and per-criterion averages. You can export scores and attendance as CSV.
+
+## Local preview
+```bash
+npm run dev
+```
+Then open http://localhost:5173. The camera works on localhost too.

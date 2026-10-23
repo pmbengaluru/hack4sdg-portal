@@ -1,0 +1,5 @@
+project_id = "kokdabbyzhdlwhwfxopf"
+
+[functions.admin]
+# The function checks the caller's session and admin role itself.
+verify_jwt = false
