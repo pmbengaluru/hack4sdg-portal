@@ -265,6 +265,8 @@ revoke execute on function public.scan_participant(bigint, text) from anon, publ
 revoke execute on function public.import_teams(jsonb, boolean)   from anon, public;
 grant  execute on function public.scan_participant(bigint, text) to authenticated;
 grant  execute on function public.import_teams(jsonb, boolean)   to authenticated;
+revoke execute on function public.my_role()          from anon, public;
+revoke execute on function public.has_role(text[])   from anon, public;
 grant  execute on function public.my_role() to authenticated;
 grant  execute on function public.has_role(text[]) to authenticated;
 
