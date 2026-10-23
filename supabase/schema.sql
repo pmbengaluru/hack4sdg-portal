@@ -47,8 +47,12 @@ create table if not exists public.checkpoints (
   criteria    jsonb not null default '[]'::jsonb,
   active      boolean not null default true,
   sort_order  int not null default 0,
+  starts_at   timestamptz,
+  ends_at     timestamptz,
   created_at  timestamptz not null default now()
 );
+alter table public.checkpoints add column if not exists starts_at timestamptz;
+alter table public.checkpoints add column if not exists ends_at   timestamptz;
 
 create table if not exists public.scans (
   id             bigint generated always as identity primary key,

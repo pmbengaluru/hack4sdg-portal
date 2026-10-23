@@ -129,7 +129,44 @@ async function loadSettings() {
   state.settings = Object.fromEntries(rows.map((r) => [r.key, r.value ?? ""]));
   document.title = `${state.settings.event_name || "Event"} Portal`;
 }
-const getCheckpoints = async () => must(await sb.from("checkpoints").select("*").order("sort_order").order("id"));
+const getCheckpoints = async () =>
+  must(await sb.from("checkpoints").select("*").order("starts_at", { ascending: true, nullsFirst: false }).order("sort_order").order("id"));
+
+// checkpoint timings
+const toLocalInput = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+};
+const fromLocalInput = (v) => (v ? new Date(v).toISOString() : null);
+function cpWindow(c) {
+  if (!c.starts_at && !c.ends_at) return "";
+  const day = (d) => d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+  const tm = (d) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const a = c.starts_at && new Date(c.starts_at), b = c.ends_at && new Date(c.ends_at);
+  if (a && b) return day(a) === day(b) ? `${day(a)}, ${tm(a)} – ${tm(b)}` : `${day(a)} ${tm(a)} – ${day(b)} ${tm(b)}`;
+  return a ? `From ${day(a)} ${tm(a)}` : `Until ${day(b)} ${tm(b)}`;
+}
+function cpTimeState(c) {
+  const now = Date.now();
+  if (c.starts_at && now < new Date(c.starts_at)) return "upcoming";
+  if (c.ends_at && now > new Date(c.ends_at)) return "over";
+  return c.starts_at || c.ends_at ? "live" : null;
+}
+function cpTimeBadge(c) {
+  const st = cpTimeState(c);
+  if (!st) return "";
+  const mins = (t) => Math.round((new Date(t) - Date.now()) / 60000);
+  const rel = (m) => (Math.abs(m) >= 120 ? `${Math.round(Math.abs(m) / 60)} h` : `${Math.abs(m)} min`);
+  if (st === "upcoming") return `<span class="badge">starts in ${rel(mins(c.starts_at))}</span>`;
+  if (st === "over") return '<span class="badge">time over</span>';
+  return `<span class="badge ok">now${c.ends_at ? ` · ${rel(mins(c.ends_at))} left` : ""}</span>`;
+}
+// default checkpoint on scan/judge pages: the one happening now, else the last one used, else the first
+const pickCheckpoint = (list, wanted) =>
+  list.find((c) => c.id === Number(wanted)) || list.find((c) => cpTimeState(c) === "live") ||
+  list.find((c) => { try { return c.id === Number(localStorage.getItem("cp")); } catch { return false; } }) || list.find((c) => cpTimeState(c) === "upcoming") || list[0];
+const cpOption = (c, sel) => `<option value="${c.id}" ${c.id === sel.id ? "selected" : ""}>${esc(c.name)}${cpWindow(c) ? ` (${esc(cpWindow(c))})` : ""}</option>`;
 const getTeams = async () =>
   must(await sb.from("teams").select("id,name,declared_size,college,participants(id,name,email,phone,is_leader,token,email_status,email_sent_at,email_error)").order("name"));
 const getParticipants = async () =>
@@ -250,13 +287,13 @@ async function viewDashboard(main) {
     if (c.type === "scan") {
       const n = count(scans, (s) => s.checkpoint_id === c.id);
       const pct = parts.length ? Math.round((n / parts.length) * 100) : 0;
-      return `<tr><td><b>${esc(c.name)}</b></td><td><span class="badge info">Scan</span></td>
+      return `<tr><td><b>${esc(c.name)}</b>${cpWindow(c) ? `<br><span class="small muted">${esc(cpWindow(c))}</span> ${cpTimeBadge(c)}` : ""}</td><td><span class="badge info">Scan</span></td>
         <td>${c.active ? '<span class="badge ok">Open</span>' : '<span class="badge">Closed</span>'}</td>
         <td style="min-width:160px"><div class="progress"><div style="width:${pct}%"></div></div><span class="small muted">${n} / ${parts.length} people</span></td></tr>`;
     }
     const n = new Set(scores.filter((s) => s.checkpoint_id === c.id).map((s) => s.team_id)).size;
     const pct = teams.count ? Math.round((n / teams.count) * 100) : 0;
-    return `<tr><td><b>${esc(c.name)}</b></td><td><span class="badge warn">Judging</span></td>
+    return `<tr><td><b>${esc(c.name)}</b>${cpWindow(c) ? `<br><span class="small muted">${esc(cpWindow(c))}</span> ${cpTimeBadge(c)}` : ""}</td><td><span class="badge warn">Judging</span></td>
       <td>${c.active ? '<span class="badge ok">Open</span>' : '<span class="badge">Closed</span>'}</td>
       <td><div class="progress"><div style="width:${pct}%"></div></div><span class="small muted">${n} / ${teams.count} teams graded</span></td></tr>`;
   }).join("");
@@ -406,6 +443,24 @@ function showQr(p, team) {
   });
 }
 
+async function emailTeam(t, btn) {
+  const leader = t.participants.find((x) => x.is_leader && x.email) || t.participants.find((x) => x.email);
+  if (!leader) return toast(`${t.name} has no email address – add one to the leader first`, "bad");
+  const again = t.participants.some((p) => p.email_status === "sent") ? " <b>They were already mailed once</b> – this sends again." : "";
+  if (!(await confirmBox(`Email all <b>${t.participants.length}</b> QR codes of <b>${esc(t.name)}</b> to <b>${esc(leader.email)}</b>?${again}`, "Send"))) return;
+  const label = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
+  try {
+    const { results } = await callAdmin({ action: "send_team", team_ids: [t.id] });
+    if (!results[0]?.ok) throw new Error(results[0]?.error || "Failed");
+    toast(`${t.participants.length} QR codes sent to ${leader.email}`, "ok");
+    route();
+  } catch (e) {
+    toast(e.message, "bad");
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+  }
+}
+
 function editParticipant(p, teams) {
   const isNew = !p.id;
   modal(`
@@ -473,13 +528,14 @@ async function viewTeams(main) {
           <span class="badge">${t.participants.length} member${t.participants.length === 1 ? "" : "s"}</span>
           ${t.declared_size && t.declared_size !== t.participants.length ? `<span class="badge warn">size ${t.declared_size}</span>` : ""}
           <span class="badge ${sent === t.participants.length && sent ? "ok" : ""}">${sent}/${t.participants.length} mailed</span>
-          <button class="btn sm" data-team-edit="${t.id}">Rename</button></summary>
+          <button class="btn sm primary" data-team-mail="${t.id}" title="Email every member's QR to the team leader">✉ Email QRs</button>
+          <button class="btn sm" data-team-edit="${t.id}">Rename</button>
+          <button class="btn sm danger" data-team-del="${t.id}">Delete</button></summary>
         <div class="members">${sorted.map((p) => `
           <div class="member"><div class="who"><b>${esc(p.name)}</b> ${p.is_leader ? '<span class="badge brand">Lead</span>' : ""}<br>
             <span class="small muted">${esc(p.email || "—")} ${p.phone ? "· " + esc(p.phone) : ""} · <span class="code">${esc(p.token)}</span></span></div>
             ${emailBadge(p)}
             <button class="btn sm" data-qr="${p.id}">QR</button><button class="btn sm" data-edit="${p.id}">Edit</button></div>`).join("") || '<div class="empty">No members</div>'}
-          <div class="row" style="padding:6px 8px"><button class="btn sm danger" data-team-del="${t.id}">Delete team</button></div>
         </div></details>`;
     }).join("") : `<div class="empty">${teams.length ? "No matches" : 'No teams yet – <a href="#/import">import a CSV</a>.'}</div>`;
   };
@@ -501,9 +557,10 @@ async function viewTeams(main) {
         try { must(await sb.from("teams").update({ name: name.trim() }).eq("id", t.id)); route(); } catch (er) { toast(er.message, "bad"); }
       }
     }
+    if (b.dataset.teamMail) await emailTeam(teams.find((x) => x.id === Number(b.dataset.teamMail)), b);
     if (b.dataset.teamDel) {
       const t = teams.find((x) => x.id === Number(b.dataset.teamDel));
-      if (!(await confirmBox(`Delete team <b>${esc(t.name)}</b> and its ${t.participants.length} member(s)?`, "Delete", true))) return;
+      if (!(await confirmBox(`Delete team <b>${esc(t.name)}</b> and its ${t.participants.length} member(s)? Their QR codes stop working and their scans and scores are removed. This can't be undone.`, "Delete team", true))) return;
       try { must(await sb.from("teams").delete().eq("id", t.id)); toast("Team deleted"); route(); } catch (er) { toast(er.message, "bad"); }
     }
   };
@@ -543,7 +600,11 @@ function editCheckpoint(c) {
       <div class="field"><label>Description (optional)</label><input name="description" value="${esc(c.description)}"></div>
       <div class="field" id="crit-wrap"><label>Grading criteria</label><div id="crit"></div>
         <button type="button" class="btn sm" id="add-crit">+ Criterion</button></div>
-      <div class="row"><div class="grow"><label>Order</label><input name="sort_order" type="number" value="${c.sort_order ?? 0}"></div>
+      <div class="row" style="margin-bottom:12px">
+        <div class="grow"><label>Starts</label><input name="starts_at" type="datetime-local" value="${toLocalInput(c.starts_at)}"></div>
+        <div class="grow"><label>Ends</label><input name="ends_at" type="datetime-local" value="${toLocalInput(c.ends_at)}"></div></div>
+      <p class="small muted" style="margin-top:-6px">Optional. Shown to volunteers/judges and used to pick the current checkpoint automatically. Scanning is only blocked when you mark it Closed.</p>
+      <div class="row"><div class="grow"><label>Order (if no time)</label><input name="sort_order" type="number" value="${c.sort_order ?? 0}"></div>
         <label class="check" style="margin-top:20px"><input type="checkbox" name="active" ${c.active !== false ? "checked" : ""}> Open (can be scanned / graded now)</label></div>
       <div class="actions">${isNew ? "" : '<button type="button" class="btn danger" id="c-del">Delete</button>'}
         <button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
@@ -569,7 +630,9 @@ function editCheckpoint(c) {
         ? $$(".row", critEl).map((r) => ({ name: $("[data-cn]", r).value.trim(), max: Number($("[data-cm]", r).value) || 10 })).filter((x) => x.name)
         : [];
       if (type === "judging" && !criteria.length) return toast("Add at least one grading criterion", "bad");
-      const row = { name: f.get("name").trim(), type, description: f.get("description").trim() || null, criteria, sort_order: Number(f.get("sort_order")) || 0, active: f.get("active") === "on" };
+      const starts_at = fromLocalInput(f.get("starts_at")), ends_at = fromLocalInput(f.get("ends_at"));
+      if (starts_at && ends_at && ends_at <= starts_at) return toast("End time must be after the start time", "bad");
+      const row = { name: f.get("name").trim(), type, description: f.get("description").trim() || null, criteria, sort_order: Number(f.get("sort_order")) || 0, active: f.get("active") === "on", starts_at, ends_at };
       try {
         must(isNew ? await sb.from("checkpoints").insert(row) : await sb.from("checkpoints").update(row).eq("id", c.id));
         toast("Checkpoint saved", "ok"); close(); route();
@@ -586,6 +649,7 @@ async function viewCheckpoints(main) {
   const cps = await getCheckpoints();
   const row = (c) => `<tr>
     <td><b>${esc(c.name)}</b>${c.description ? `<br><span class="small muted">${esc(c.description)}</span>` : ""}</td>
+    <td class="small">${cpWindow(c) ? `${esc(cpWindow(c))}<br>${cpTimeBadge(c)}` : '<span class="muted">—</span>'}</td>
     <td>${c.type === "scan" ? '<span class="badge info">QR scan · volunteers</span>' : '<span class="badge warn">Judging · mentors</span>'}</td>
     <td class="small">${c.type === "judging" ? c.criteria.map((x) => `${esc(x.name)} (${x.max})`).join(", ") : "—"}</td>
     <td><button class="btn sm" data-toggle="${c.id}">${c.active ? "✓ Open" : "Closed"}</button></td>
@@ -593,7 +657,7 @@ async function viewCheckpoints(main) {
   main.innerHTML = `
     <div class="page-head"><div><h1>Checkpoints</h1><p class="muted">Mark each checkpoint as a <b>QR scan</b> (volunteers) or <b>judging</b> round (mentors grade teams).</p></div>
       <button class="btn primary" id="new">+ New checkpoint</button></div>
-    <div class="card">${cps.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Criteria (max)</th><th>Status</th><th></th></tr></thead>
+    <div class="card">${cps.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>When</th><th>Type</th><th>Criteria (max)</th><th>Status</th><th></th></tr></thead>
       <tbody>${cps.map(row).join("")}</tbody></table></div>` : `<div class="empty">No checkpoints yet.<br><br>
       <button class="btn" id="quick">Add suggested set: Check-in, Lunch, Dinner, Final judging</button></div>`}</div>`;
   $("#new").onclick = () => editCheckpoint({ type: "scan", sort_order: cps.length + 1 });
@@ -758,6 +822,11 @@ async function viewEmails(main, modeArg) {
     </div>
     ${mode === "person" && noOwnEmail ? `<div class="notice">${noOwnEmail} people have no email of their own and are skipped in this mode. Use <a href="#/emails/team">Per team</a> to send their QR codes to their team leader.</div>` : ""}
     ${noEmailTeams.length ? `<div class="notice">${noEmailTeams.length} team(s) have no email address at all: ${noEmailTeams.map((t) => `<b>${esc(t.name)}</b>`).join(", ")}. Add an email under <a href="#/teams">Teams</a> or print their badges.</div>` : ""}
+    ${mode === "team" ? `<div class="card"><h3>Send to one team</h3>
+      <div class="row"><input class="grow" id="one-team" list="team-list" placeholder="Type a team name…">
+        <datalist id="team-list">${teams.map((t) => `<option value="${esc(t.name)}">`).join("")}</datalist>
+        <button class="btn primary" id="one-send">✉ Send this team's QRs</button></div>
+      <p class="small muted" id="one-info" style="margin-bottom:0"></p></div>` : ""}
     <div class="card">
       <div class="row">
         <button class="btn primary lg" data-send="pending" ${lists.pending.length ? "" : "disabled"}>✉ Send to all not yet mailed (${plural(lists.pending.length)}${mode === "team" ? ` · ${peopleIn(lists.pending)} QRs` : ""})</button>
@@ -782,6 +851,20 @@ async function viewEmails(main, modeArg) {
     e.target.disabled = false;
   };
   $("#stop").onclick = () => { mailJob.cancel = true; $("#job-st").textContent = "Stopping after this batch…"; };
+  if (mode === "team") {
+    const pick = () => teams.find((t) => t.name.toLowerCase() === $("#one-team").value.trim().toLowerCase());
+    $("#one-team").oninput = () => {
+      const t = pick();
+      const lead = t && leaderOf(t);
+      $("#one-info").innerHTML = t ? `${t.participants.length} members · goes to ${esc(lead?.email || "no email!")} · ${
+        { sent: "already mailed", pending: "not mailed yet", failed: "last attempt failed", noemail: "no email in team" }[teamStatus(t)]}` : "";
+    };
+    $("#one-send").onclick = (e) => {
+      const t = pick();
+      if (!t) return toast("Pick a team from the list", "bad");
+      emailTeam(t, e.target);
+    };
+  }
 
   $$("[data-send]").forEach((b) => (b.onclick = async () => {
     const list = lists[b.dataset.send];
@@ -847,14 +930,15 @@ async function viewScan(main, cpId) {
     main.innerHTML = `<h1>Scan</h1><div class="card empty">No open QR-scan checkpoints.${state.me.role === "admin" ? ' <a href="#/checkpoints">Create or open one</a>.' : " Ask an admin to open one."}</div>`;
     return;
   }
-  const cp = open.find((c) => c.id === Number(cpId)) || open.find((c) => c.id === Number(localStorage.getItem("cp"))) || open[0];
-  localStorage.setItem("cp", cp.id);
+  const cp = pickCheckpoint(open, cpId);
+  try { localStorage.setItem("cp", cp.id); } catch { /* storage unavailable */ }
   const { count: total } = await sb.from("participants").select("id", { count: "exact", head: true });
   let { count: done } = await sb.from("scans").select("id", { count: "exact", head: true }).eq("checkpoint_id", cp.id);
 
   main.innerHTML = `
     <div class="page-head"><div><h1>Scan</h1></div>
-      <select id="cp" style="width:auto;min-width:200px">${open.map((c) => `<option value="${c.id}" ${c.id === cp.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></div>
+      <select id="cp" style="width:auto;min-width:200px">${open.map((c) => cpOption(c, cp)).join("")}</select></div>
+    ${cpTimeState(cp) === "upcoming" || cpTimeState(cp) === "over" ? `<div class="notice">${esc(cp.name)} is scheduled for <b>${esc(cpWindow(cp))}</b> ${cpTimeBadge(cp)} – double-check you've picked the right checkpoint.</div>` : ""}
     <div class="scan-layout">
       <div>
         <div id="reader"></div>
@@ -863,7 +947,7 @@ async function viewScan(main, cpId) {
       <div>
         <div class="result" id="res"><div><div class="big" style="color:var(--muted)">Ready</div><div class="sub muted">Point the camera at a participant's QR</div></div></div>
         <div class="card" style="margin-top:12px">
-          <div class="row" style="justify-content:space-between"><b>${esc(cp.name)}</b><span><b id="done">${done}</b> / ${total} scanned</span></div>
+          <div class="row" style="justify-content:space-between"><span><b>${esc(cp.name)}</b> ${cpTimeBadge(cp)}</span><span><b id="done">${done}</b> / ${total} scanned</span></div>
           <div class="progress" style="margin-top:6px"><div id="bar" style="width:${total ? (done / total) * 100 : 0}%"></div></div>
         </div>
         <div class="card"><h3>Manual entry</h3><p class="small muted" style="margin-top:0">No QR? Search by name, email or pass code.</p>
@@ -940,7 +1024,7 @@ async function viewJudge(main, cpId, teamId) {
     main.innerHTML = `<h1>Judging</h1><div class="card empty">No judging rounds are open.${state.me.role === "admin" ? ' <a href="#/checkpoints">Create one</a>.' : " Ask an admin to open one."}</div>`;
     return;
   }
-  const cp = cps.find((c) => c.id === Number(cpId)) || cps[0];
+  const cp = pickCheckpoint(cps, cpId);
   if (teamId) return judgeTeam(main, cp, Number(teamId));
 
   const [teams, mine] = await Promise.all([
@@ -952,7 +1036,7 @@ async function viewJudge(main, cpId, teamId) {
 
   main.innerHTML = `
     <div class="page-head"><div><h1>Judging</h1><p class="muted">You've graded ${scored.size} of ${teams.length} teams</p></div>
-      <select id="cp" style="width:auto;min-width:200px">${cps.map((c) => `<option value="${c.id}" ${c.id === cp.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></div>
+      <select id="cp" style="width:auto;min-width:200px">${cps.map((c) => cpOption(c, cp)).join("")}</select></div>
     <div class="scan-layout">
       <div class="card"><h3>Scan any team member's QR</h3><div id="reader"></div>
         <div class="row" style="margin-top:10px"><button class="btn" id="cam">Start camera</button><span class="small muted" id="cam-st"></span></div></div>
