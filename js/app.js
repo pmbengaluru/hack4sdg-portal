@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261023.2300";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261023.2300";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261023.2307";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261023.2307";
 
-const APP_VERSION = "20261023.2300"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261023.2307"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -789,16 +789,72 @@ async function viewTeams(main) {
   main.innerHTML = `
     <div class="page-head"><div><h1>Teams & QR codes</h1><p class="muted">${teams.length} teams · ${total} participants</p></div>
       <div class="row"><button class="btn" id="add-team">+ Team</button><button class="btn" id="add-p" ${teams.length ? "" : "disabled"}>+ Participant</button>
-      <button class="btn" id="number">Table numbers…</button>
+      <button class="btn" id="tmode">✎ Table numbers</button>
       <button class="btn" id="exp">Export CSV</button><a class="btn" href="#/print">Print badges</a></div></div>
     <div class="row" style="margin-bottom:14px"><input class="grow" id="q" placeholder="Search team, table, college, name, email, phone or code…">
       <select id="sort" style="width:auto"><option value="name">Sort: name</option><option value="table">Sort: table no.</option></select>
       <select id="filter" style="width:auto"><option value="">All</option><option value="pending">Not mailed</option><option value="sent">Mailed</option><option value="failed">Mail failed</option><option value="noemail">No email</option></select></div>
     <div id="list"></div>`;
 
+  let tableMode = false;
+  // Quick entry: every team in one table with a number box; Enter saves and moves to the next team.
+  const drawTables = (q) => {
+    const shown = teams.filter((t) => !q || `${t.name} ${t.college || ""} ${t.table_no || ""}`.toLowerCase().includes(q));
+    const numbered = teams.filter((t) => t.table_no).length;
+    $("#list").innerHTML = `<div class="card tbl-entry">
+      <div class="row" style="margin-bottom:10px">
+        <div class="grow"><b>Table numbers</b> <span class="badge ${numbered === teams.length ? "ok" : ""}">${numbered} / ${teams.length} numbered</span><br>
+          <span class="small muted">Type a number and press <b>Enter</b> – it saves and jumps to the next team. ↑/↓ move between rows, Esc undoes.</span></div>
+        <button class="btn sm" id="auto-num">Auto-number…</button><button class="btn sm primary" id="tdone">Done</button></div>
+      <div class="table-wrap"><table><thead><tr><th style="width:140px">Table</th><th>Team</th><th>College</th><th style="width:80px">Members</th><th style="width:170px"></th></tr></thead><tbody>
+      ${shown.map((t) => `<tr><td><input class="tno-input" data-tno="${t.id}" value="${esc(t.table_no)}" maxlength="20" autocomplete="off" enterkeyhint="next" placeholder="—" aria-label="Table number for ${esc(t.name)}"></td>
+        <td><b>${esc(t.name)}</b></td><td class="small muted">${esc(t.college || "")}</td><td>${t.participants.length}</td>
+        <td class="small" data-st="${t.id}"></td></tr>`).join("") || '<tr><td colspan="5" class="empty">No matching teams</td></tr>'}
+      </tbody></table></div></div>`;
+    markDuplicates();
+  };
+  const markDuplicates = () => {
+    const seen = new Map();
+    teams.forEach((t) => t.table_no && seen.set(t.table_no.toLowerCase(), [...(seen.get(t.table_no.toLowerCase()) || []), t]));
+    $$(".tno-input").forEach((inp) => {
+      const t = teams.find((x) => x.id === Number(inp.dataset.tno));
+      const same = t.table_no ? seen.get(t.table_no.toLowerCase()).filter((x) => x.id !== t.id) : [];
+      inp.classList.toggle("dup", same.length > 0);
+      const st = $(`[data-st="${t.id}"]`);
+      if (same.length) st.innerHTML = `<span style="color:var(--warn)">Same as ${esc(same.map((x) => x.name).join(", "))}</span>`;
+      else if (st.dataset.saved !== "1") st.innerHTML = "";
+    });
+  };
+  const saveTable = async (inp) => {
+    const t = teams.find((x) => x.id === Number(inp.dataset.tno));
+    const v = inp.value.trim() || null;
+    // Enter saves and moves focus, which also fires "change": skip the second call
+    if ((t.table_no || null) === v || inp.dataset.pending === (v ?? "")) return;
+    inp.dataset.pending = v ?? "";
+    const st = $(`[data-st="${t.id}"]`);
+    st.innerHTML = '<span class="muted">Saving…</span>';
+    try {
+      must(await sb.from("teams").update({ table_no: v }).eq("id", t.id));
+      t.table_no = v;
+      st.dataset.saved = "1";
+      st.innerHTML = `<span style="color:var(--ok)">✓ Saved</span>`;
+      setTimeout(() => { st.dataset.saved = ""; markDuplicates(); }, 1800);
+      markDuplicates();
+      const numbered = teams.filter((x) => x.table_no).length;
+      const badge = $(".tbl-entry .badge");
+      if (badge) { badge.textContent = `${numbered} / ${teams.length} numbered`; badge.classList.toggle("ok", numbered === teams.length); }
+    } catch (er) {
+      st.innerHTML = `<span style="color:var(--bad)">Not saved</span>`;
+      toast(er.message, "bad");
+    } finally {
+      delete inp.dataset.pending;
+    }
+  };
+
   const draw = () => {
     const q = $("#q").value.trim().toLowerCase(), fl = $("#filter").value;
     teams.sort($("#sort").value === "table" ? byTable : (a, b) => a.name.localeCompare(b.name));
+    if (tableMode) return drawTables(q);
     const match = (p) => (!fl || (fl === "noemail" ? !p.email : p.email && p.email_status === fl));
     const rows = teams.map((t) => {
       const teamHit = !q || `${t.name} ${t.college || ""} table ${t.table_no || "-"}`.toLowerCase().includes(q);
@@ -829,12 +885,33 @@ async function viewTeams(main) {
   $("#q").oninput = draw;
   $("#filter").onchange = draw;
   $("#sort").onchange = draw;
-  $("#number").onclick = () => numberTables(teams);
+  const setMode = (on) => {
+    tableMode = on;
+    $("#tmode").classList.toggle("primary", on);
+    $("#filter").style.display = on ? "none" : "";
+    draw();
+    if (on) $(".tno-input")?.focus();
+  };
+  $("#tmode").onclick = () => setMode(!tableMode);
+  $("#list").addEventListener("click", (e) => {
+    if (e.target.id === "tdone") setMode(false);
+    if (e.target.id === "auto-num") numberTables(teams);
+  });
+  $("#list").addEventListener("change", (e) => { if (e.target.matches(".tno-input")) saveTable(e.target); });
+  $("#list").addEventListener("keydown", (e) => {
+    const inp = e.target.closest(".tno-input");
+    if (!inp) return;
+    const all = $$(".tno-input"), i = all.indexOf(inp);
+    const go = (j) => { const n = all[j]; if (n) { n.focus(); n.select(); } };
+    if (e.key === "Enter" || e.key === "ArrowDown") { e.preventDefault(); saveTable(inp); go(e.shiftKey ? i - 1 : i + 1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); saveTable(inp); go(i - 1); }
+    else if (e.key === "Escape") { const t = teams.find((x) => x.id === Number(inp.dataset.tno)); inp.value = t.table_no || ""; inp.blur(); }
+  });
 
   const findP = (id) => { for (const t of teams) for (const p of t.participants) if (p.id === id) return [p, t]; return []; };
   $("#list").onclick = async (e) => {
     const b = e.target.closest("button");
-    if (!b) return;
+    if (!b || tableMode) return;
     e.preventDefault();
     if (b.dataset.qr) { const [p, t] = findP(Number(b.dataset.qr)); showQr(p, t); }
     if (b.dataset.edit) { const [p, t] = findP(Number(b.dataset.edit)); editParticipant({ ...p, team_id: t.id }, teams); }

@@ -80,7 +80,7 @@ The camera scanner needs **https**, which GitHub Pages provides.
 4. **Send QR emails.** In **Per team** mode (the default), each team leader gets one email with every member's QR, shown inline and attached as separate images to forward. Any member with their own email is cc'd. **Per person** mode emails only people who have their own address. Click **Send to all not yet mailed**. Progress is saved, so you can stop and resume. Failed sends can be retried.
 5. **Scan.** Volunteers open the site on their phone, pick the checkpoint and scan. A green screen means checked in; a yellow screen means already scanned (it shows when and by whom).
 6. **Table numbers & judge assignments (optional).**
-   - **Table numbers at check-in:** tick **Collect table numbers here** on the Check-in checkpoint. When a volunteer scans *anyone* from a team that has no table number, the scan screen asks for it once. Every later scan of that team shows "Table 12". You can also number teams from **Teams & QR → Table numbers…**, or use **Edit** on a single team.
+   - **Table numbers at check-in:** tick **Collect table numbers here** on the Check-in checkpoint. When a volunteer scans *anyone* from a team that has no table number, the scan screen asks for it once. Every later scan of that team shows "Table 12". Or open **Teams & QR → ✎ Table numbers**. Every team is listed with a number box: type a number and press Enter to save and jump to the next team. **Auto-number…** is there too.
    - **Settings → Assign mentors to teams**, or the switch on **Assign judges**:
      - **Off:** any mentor can judge any team.
      - **On:** each mentor can only judge the teams assigned to them. The database enforces this.
