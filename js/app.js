@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.1829";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261024.1829";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.2245";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261024.2245";
 
-const APP_VERSION = "20261024.1829"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261024.2245"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -234,6 +234,7 @@ const ICON_PATHS = {
   account: '<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>',
   assign: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
   phone: '<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/>',
+  podium: '<path d="M8 21V11H3v10h5zM21 21v-7h-5v7h5zM16 21V7H8v14h8z"/><path d="m12 2 .9 1.8 2 .3-1.4 1.4.3 2-1.8-.9-1.8.9.3-2-1.4-1.4 2-.3z"/>',
   attendance: '<path d="M16 3h5v5M21 3l-7 7"/><path d="M8 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6"/><path d="m9 15 2 2 4-4"/><path d="M14 21h5a2 2 0 0 0 2-2v-5"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
@@ -277,6 +278,7 @@ const ROUTES = {
   assign: { label: "Assign judges", icon: "assign", roles: ["admin"], view: viewAssign },
   attendance: { label: "Attendance", icon: "attendance", roles: ["admin", "volunteer"], view: viewAttendance },
   results: { label: "Results", icon: "results", roles: ["admin"], view: viewResults },
+  leaderboard: { label: "Leaderboard", icon: "podium", roles: ["admin"], view: viewLeaderboard },
   settings: { label: "Settings", icon: "settings", roles: ["admin"], view: viewSettings },
   account: { label: "Account", icon: "account", roles: ["admin", "volunteer", "mentor"], view: viewAccount },
   print: { label: "Print badges", roles: ["admin"], view: viewPrint, hidden: true },
@@ -2135,6 +2137,169 @@ async function viewAssign(main, cpId) {
     if (!(await confirmBox(`Remove all ${here.length} assignments in <b>${esc(cp.name)}</b>?`, "Clear", true))) return;
     try { must(await sb.from("judge_assignments").delete().eq("checkpoint_id", cp.id)); toast("Cleared"); route(); }
     catch (er) { toast(er.message, "bad"); }
+  };
+}
+
+// ------------------------------------------------------------------ leaderboard (combine judging rounds)
+// A team's score in a round = average of its judges' totals. Rounds are then combined:
+//  avg: weighted average of each round's percentage (score / round max), scaled to `scale`
+//  sum: weighted sum of round scores divided by the weighted sum of round maxima, scaled to `scale`
+// Rounds a team wasn't judged in count as 0, or (missing: "skip") are left out of that team's calculation.
+function computeLeaderboard(teams, rounds, scores, cfg) {
+  const used = rounds.filter((r) => cfg.rounds.includes(r.id));
+  const roundMax = (r) => r.criteria.reduce((n, c) => n + Number(c.max || 0), 0) || 1;
+  const w = (r) => Math.max(0, Number(cfg.weights[r.id] ?? 1));
+  const rows = teams.map((t) => {
+    const per = used.map((r) => {
+      const s = scores.filter((x) => x.checkpoint_id === r.id && x.team_id === t.id);
+      const avg = s.length ? s.reduce((n, x) => n + Number(x.total), 0) / s.length : null;
+      return { round: r, avg, judges: s.length, max: roundMax(r), judgeNames: s.map((x) => x.judge_name || "Judge") };
+    });
+    const counted = per.filter((p) => w(p.round) > 0 && (p.avg != null || cfg.missing === "zero"));
+    let score = null;
+    if (counted.length && per.some((p) => p.avg != null)) {
+      if (cfg.mode === "sum") {
+        const got = counted.reduce((n, p) => n + w(p.round) * (p.avg ?? 0), 0);
+        const best = counted.reduce((n, p) => n + w(p.round) * p.max, 0);
+        score = best ? (got / best) * cfg.scale : 0;
+      } else {
+        const tw = counted.reduce((n, p) => n + w(p.round), 0);
+        score = tw ? (counted.reduce((n, p) => n + w(p.round) * ((p.avg ?? 0) / p.max), 0) / tw) * cfg.scale : 0;
+      }
+    }
+    return { t, per, score, judged: per.filter((p) => p.avg != null).length };
+  });
+  rows.sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || b.judged - a.judged || a.t.name.localeCompare(b.t.name));
+  // standard competition ranking: equal scores share a rank (1, 2, 2, 4)
+  let prev = null, rank = 0;
+  rows.forEach((r, i) => {
+    if (r.score == null) { r.rank = null; return; }
+    const key = r.score.toFixed(4);
+    if (key !== prev) { rank = i + 1; prev = key; }
+    r.rank = rank;
+  });
+  return { rows, used };
+}
+
+const LB_DEFAULT = { rounds: null, weights: {}, mode: "avg", scale: 100, missing: "zero" };
+
+async function viewLeaderboard(main) {
+  await loadSettings();
+  const rounds = (await getCheckpoints()).filter((c) => c.type === "judging");
+  if (!rounds.length) {
+    main.innerHTML = `<h1>Leaderboard</h1><div class="card empty">No judging rounds yet. <a href="#/checkpoints">Create a judging checkpoint</a> first.</div>`;
+    return;
+  }
+  const [teams, scoreLists] = await Promise.all([
+    sb.from("teams").select("id,name,table_no,college").order("name").then(must),
+    Promise.all(rounds.map((r) => sb.from("scores").select("checkpoint_id,team_id,total,judge_name").eq("checkpoint_id", r.id).then(must))),
+  ]);
+  const scores = scoreLists.flat();
+  let saved = {};
+  try { saved = JSON.parse(state.settings.leaderboard_config || "{}"); } catch { /* ignore bad JSON */ }
+  const cfg = { ...LB_DEFAULT, ...saved, weights: { ...(saved.weights || {}) } };
+  cfg.rounds = (cfg.rounds || rounds.map((r) => r.id)).filter((id) => rounds.some((r) => r.id === id));
+  if (!cfg.rounds.length) cfg.rounds = rounds.map((r) => r.id);
+  const maxOf = (r) => r.criteria.reduce((n, c) => n + Number(c.max || 0), 0);
+  const fmt = (n, d = 2) => (n == null ? "—" : Number(n).toFixed(d).replace(/\.?0+$/, "") || "0");
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Leaderboard</h1><p class="muted">Choose which judging rounds count and how they're combined. The ranking updates as you change the options.</p></div>
+      <div class="row"><button class="btn" id="lb-save">Save as default</button><button class="btn primary" id="lb-xl">⬇ Excel</button></div></div>
+    <div class="lb-layout">
+      <form class="card lb-opts" id="lb-form">
+        <h2>1 · Rounds to include</h2>
+        <div class="lb-rounds">${rounds.map((r) => `
+          <div class="lb-round">
+            <label class="check" style="margin:0;flex:1"><input type="checkbox" name="round" value="${r.id}" ${cfg.rounds.includes(r.id) ? "checked" : ""}>
+              <span><b>${esc(r.name)}</b><br><span class="small muted">out of ${maxOf(r)} · ${new Set(scores.filter((s) => s.checkpoint_id === r.id).map((s) => s.team_id)).size} teams judged</span></span></label>
+            <label class="lb-weight" title="How much this round counts compared with the others">Weight
+              <input type="number" name="w-${r.id}" min="0" step="0.5" value="${cfg.weights[r.id] ?? 1}"></label>
+          </div>`).join("")}</div>
+        <h2 style="margin-top:18px">2 · Combine rounds by</h2>
+        <label class="lb-mode"><input type="radio" name="mode" value="avg" ${cfg.mode !== "sum" ? "checked" : ""}>
+          <span><b>Average</b><br><span class="small muted">Each round becomes a percentage of its own maximum, then the percentages are averaged (using the weights). Every round counts equally, whatever its maximum score.</span></span></label>
+        <label class="lb-mode"><input type="radio" name="mode" value="sum" ${cfg.mode === "sum" ? "checked" : ""}>
+          <span><b>Sum, scaled down</b><br><span class="small muted">Round scores are added up (× weight), then scaled so the best possible total equals the number below. Rounds with more marks count for more.</span></span></label>
+        <div class="row" style="margin-top:8px"><label style="margin:0">Final score out of</label>
+          <input type="number" name="scale" min="1" step="1" value="${cfg.scale}" style="width:110px"></div>
+        <h2 style="margin-top:18px">3 · Team missed a round?</h2>
+        <label class="check"><input type="radio" name="missing" value="zero" ${cfg.missing !== "skip" ? "checked" : ""}> <span>Count it as <b>0</b> for that round</span></label>
+        <label class="check"><input type="radio" name="missing" value="skip" ${cfg.missing === "skip" ? "checked" : ""}> <span><b>Leave it out</b> – use only the rounds the team was judged in</span></label>
+        <p class="small muted" style="margin-bottom:0">Within a round, a team's score is always the average of its judges' totals.</p>
+      </form>
+      <div class="lb-main">
+        <div id="lb-podium" class="podium"></div>
+        <div class="card"><div class="row" style="margin-bottom:8px"><h2 style="margin:0;flex:1" id="lb-title"></h2>
+          <input id="lb-q" placeholder="Find a team…" style="max-width:200px"></div>
+          <div id="lb-table"></div></div>
+      </div>
+    </div>`;
+
+  const form = $("#lb-form");
+  const readCfg = () => {
+    const f = new FormData(form);
+    cfg.rounds = f.getAll("round").map(Number);
+    rounds.forEach((r) => { cfg.weights[r.id] = Number(f.get(`w-${r.id}`)) || 0; });
+    cfg.mode = f.get("mode");
+    cfg.scale = Math.max(1, Number(f.get("scale")) || 100);
+    cfg.missing = f.get("missing");
+  };
+  let current;
+  const draw = () => {
+    readCfg();
+    current = computeLeaderboard(teams, rounds, scores, cfg);
+    const { rows, used } = current;
+    const ranked = rows.filter((r) => r.score != null);
+    $("#lb-title").textContent = used.length
+      ? `${ranked.length} ranked team${ranked.length === 1 ? "" : "s"} · ${cfg.mode === "sum" ? "sum" : "average"} of ${used.map((r) => r.name).join(" + ")}, out of ${cfg.scale}`
+      : "Tick at least one round";
+    const medals = ["🥇", "🥈", "🥉"];
+    $("#lb-podium").innerHTML = ranked.slice(0, 3).map((r, i) => `
+      <div class="pod pod-${i + 1}"><div class="pod-medal">${medals[r.rank - 1] || "🏅"}</div>
+        <div class="pod-name">${esc(r.t.name)}</div><div class="small muted">${r.t.table_no ? `Table ${esc(r.t.table_no)}` : ""}${r.t.college ? ` · ${esc(r.t.college)}` : ""}</div>
+        <div class="pod-score">${fmt(r.score)}<small>/ ${cfg.scale}</small></div></div>`).join("");
+    const q = $("#lb-q").value.trim().toLowerCase();
+    const list = rows.filter((r) => !q || `${r.t.name} ${r.t.table_no || ""} ${r.t.college || ""}`.toLowerCase().includes(q));
+    $("#lb-table").innerHTML = !used.length ? '<div class="empty">Tick at least one round on the left.</div>' : `<div class="table-wrap"><table class="lb-table">
+      <thead><tr><th>Rank</th><th>Team</th>${used.map((r) => `<th>${esc(r.name)}<br><span class="small muted" style="text-transform:none;letter-spacing:0">/ ${maxOf(r)}${Number(cfg.weights[r.id] ?? 1) !== 1 ? ` · ×${cfg.weights[r.id]}` : ""}</span></th>`).join("")}<th>Final / ${cfg.scale}</th></tr></thead>
+      <tbody>${list.map((r) => `<tr class="${r.rank && r.rank <= 3 ? "top" : ""}"><td><b>${r.rank ?? "—"}</b></td>
+        <td><b>${esc(r.t.name)}</b>${r.t.table_no ? ` <span class="small muted">· Table ${esc(r.t.table_no)}</span>` : ""}</td>
+        ${r.per.map((p) => `<td title="${p.judges ? esc(p.judgeNames.join(", ")) : "Not judged"}">${p.avg == null ? '<span class="muted">—</span>' : `${fmt(p.avg)} <span class="small muted">(${p.judges} judge${p.judges === 1 ? "" : "s"})</span>`}</td>`).join("")}
+        <td><b class="lb-final">${fmt(r.score)}</b></td></tr>`).join("") || `<tr><td colspan="${used.length + 3}" class="empty">No matching teams</td></tr>`}</tbody></table></div>`;
+  };
+  draw();
+  form.addEventListener("input", draw);
+  form.addEventListener("change", draw);
+  $("#lb-q").oninput = draw;
+
+  $("#lb-save").onclick = async () => {
+    readCfg();
+    try {
+      must(await sb.from("settings").upsert({ key: "leaderboard_config", value: JSON.stringify(cfg) }));
+      state.settings.leaderboard_config = JSON.stringify(cfg);
+      toast("Saved – the leaderboard will open with these options", "ok");
+    } catch (er) { toast(er.message, "bad"); }
+  };
+  $("#lb-xl").onclick = async (e) => {
+    const btn = e.target; btn.disabled = true;
+    try {
+      const XLSX = await loadSheetJs();
+      const { rows, used } = current;
+      const head = ["Rank", "Team", "Table", "College", ...used.flatMap((r) => [`${r.name} (avg / ${maxOf(r)})`, `${r.name} judges`]), `Final score / ${cfg.scale}`];
+      const body = rows.map((r) => [r.rank ?? "", r.t.name, r.t.table_no || "", r.t.college || "",
+        ...r.per.flatMap((p) => [p.avg == null ? "" : Number(p.avg.toFixed(2)), p.judges]), r.score == null ? "" : Number(r.score.toFixed(2))]);
+      const how = [["Method", cfg.mode === "sum" ? `Sum of round scores scaled to ${cfg.scale}` : `Average of round percentages, scaled to ${cfg.scale}`],
+        ["Rounds", used.map((r) => `${r.name} (weight ${cfg.weights[r.id] ?? 1})`).join(", ")],
+        ["Missing rounds", cfg.missing === "skip" ? "Left out for that team" : "Counted as 0"],
+        ["Within a round", "Average of the judges' totals"], ["Generated", fmtFull(new Date().toISOString())]];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, head, body), "Leaderboard");
+      XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, ["Setting", "Value"], how), "How it was calculated");
+      XLSX.writeFile(wb, `${safeName(state.settings.event_name || "Event")}_leaderboard_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      toast("Excel file downloaded", "ok");
+    } catch (er) { toast(er.message, "bad"); }
+    btn.disabled = false;
   };
 }
 

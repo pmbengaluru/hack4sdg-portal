@@ -411,6 +411,33 @@ details.card[open] > summary::before { transform: rotate(90deg); }
 .jb { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; background: rgba(100, 112, 138, .12); font-size: .78rem; white-space: nowrap; }
 .jb b { color: var(--brand); }
 
+/* ---------- leaderboard */
+.lb-layout { display: grid; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 1000px) { .lb-layout { grid-template-columns: 1fr; } }
+.lb-opts { position: sticky; top: 16px; }
+.lb-opts h2 { font-size: 1rem; }
+.lb-round { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1.5px solid var(--line); border-radius: 12px; margin-bottom: 8px; background: var(--panel-solid); }
+.lb-round:has(input[type=checkbox]:checked) { border-color: var(--blue); background: var(--brand-soft); }
+.lb-weight { display: flex; flex-direction: column; align-items: center; gap: 2px; margin: 0; font-size: .72rem; color: var(--muted); font-weight: 600; }
+.lb-weight input { width: 64px; text-align: center; padding: 6px; }
+.lb-mode { display: flex; gap: 10px; align-items: flex-start; padding: 10px; border: 1.5px solid var(--line); border-radius: 12px; margin-bottom: 8px; cursor: pointer; font-weight: 400; background: var(--panel-solid); }
+.lb-mode:has(input:checked) { border-color: var(--green); background: var(--ok-soft); }
+.lb-mode input { margin-top: 3px; }
+.podium { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; align-items: end; }
+.podium:empty { display: none; }
+.pod { text-align: center; padding: 16px 12px; border-radius: var(--radius); background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); animation: rise .5s var(--ease) both; }
+.pod-1 { order: 2; padding-top: 26px; border-color: #fcc30b; box-shadow: 0 18px 40px -18px rgba(252, 195, 11, .55); }
+.pod-2 { order: 1; animation-delay: .08s; }
+.pod-3 { order: 3; animation-delay: .16s; }
+.pod-medal { font-size: 2.2rem; line-height: 1; }
+.pod-1 .pod-medal { font-size: 2.8rem; }
+.pod-name { font-weight: 800; margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pod-score { font-size: 1.8rem; font-weight: 800; letter-spacing: -.03em; margin-top: 4px; }
+.pod-score small { font-size: .85rem; color: var(--muted); font-weight: 600; margin-left: 3px; }
+.lb-table tr.top td { background: rgba(252, 195, 11, .07); }
+.lb-final { font-size: 1.05rem; color: var(--brand); }
+@media (max-width: 600px) { .podium { grid-template-columns: 1fr; } .pod-1, .pod-2, .pod-3 { order: 0; } }
+
 /* ---------- judging donut */
 .donut-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-top: 10px; }
 .donut-panel { border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; background: var(--panel-solid); }

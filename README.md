@@ -100,6 +100,11 @@ The camera scanner needs **https**, which GitHub Pages provides.
    - **Auto-assign** (collapsed, optional) shares teams out evenly, and you can still change any team by hand afterwards. You can also copy assignments from another round.
    - With assignments on, a team that has no judge in a round can only be scored by an admin.
 7. **Judge.** Mentors scan any team member's QR, enter scores and comments, and save. They can edit their own scores later.
+9. **Leaderboard.** Choose which judging rounds count, with an optional weight per round, and how they're combined:
+   - **Average:** each round's percentage, so every round counts equally.
+   - **Sum, scaled down** to a number you choose (e.g. out of 100): rounds with more marks count more.
+
+   Also choose whether a round a team missed counts as 0 or is left out. Within a round, a team's score is the average of its judges. The page shows a podium and the full ranking. **⬇ Excel** includes a sheet explaining how it was calculated, and **Save as default** remembers your choices.
 8. **Results.** The leaderboard shows each team's average across judges and per-criterion averages. You can export scores and attendance as CSV.
 
 ## Publishing changes
