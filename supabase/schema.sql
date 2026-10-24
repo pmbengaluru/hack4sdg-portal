@@ -494,6 +494,22 @@ grant  execute on function public.self_checkin(bigint, text, text, text, text) t
 revoke execute on function public.resolve_self_checkin(bigint, bigint) from anon, public;
 grant  execute on function public.resolve_self_checkin(bigint, bigint) to authenticated;
 revoke execute on function public.self_code_ok(public.checkpoints, text) from anon, public;
+-- ---------------------------------------------------------------
+-- RPC: which judges have already scored each team in a round (names only, never the scores).
+-- Mentors can only read their own scores, so this lets them see "already judged by …".
+-- ---------------------------------------------------------------
+create or replace function public.judged_teams(p_checkpoint bigint)
+returns table (team_id bigint, judges jsonb)
+language sql stable security definer set search_path = public as $$
+  select s.team_id,
+         jsonb_agg(jsonb_build_object('id', s.judge_id, 'name', coalesce(s.judge_name, 'A judge')) order by s.updated_at)
+  from public.scores s
+  where s.checkpoint_id = p_checkpoint and public.has_role('admin','mentor')
+  group by s.team_id
+$$;
+revoke execute on function public.judged_teams(bigint) from anon, public;
+grant  execute on function public.judged_teams(bigint) to authenticated;
+
 revoke execute on function public.set_table_no(bigint, text, boolean) from anon, public;
 grant  execute on function public.set_table_no(bigint, text, boolean) to authenticated;
 revoke execute on function public.scan_participant(bigint, text) from anon, public;

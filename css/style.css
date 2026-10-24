@@ -368,6 +368,8 @@ body.display-mode .main { max-width: none; padding: 24px clamp(16px, 3vw, 48px);
   background: var(--grad); color: #fff; font-weight: 800; font-size: 1.3rem; line-height: 1; letter-spacing: -.02em; }
 .judge-card .tno small { font-size: .58rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; opacity: .85; margin-bottom: 3px; }
 .judge-card.is-done .tno { background: linear-gradient(120deg, var(--ok), #56c02b); }
+.judge-card .tno.by-other { background: linear-gradient(120deg, var(--orange), #fcc30b); }
+.judge-card .already { color: var(--warn); font-weight: 600; }
 .judge-card .jt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .judge-card .jt b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .h-tno { display: inline-block; vertical-align: middle; font-size: .9rem; padding: 4px 10px; border-radius: 10px; background: var(--grad); color: #fff; -webkit-text-fill-color: #fff; letter-spacing: 0; }

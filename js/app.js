@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.1736";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261024.1736";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.1828";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261024.1828";
 
-const APP_VERSION = "20261024.1736"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261024.1828"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -1787,11 +1787,15 @@ async function viewJudge(main, cpId, teamId) {
   const scope = await judgeScope(cp);
   if (teamId) return judgeTeam(main, cp, Number(teamId), scope);
 
-  const [allTeams, mine, staff] = await Promise.all([
+  const [allTeams, mine, staff, judged] = await Promise.all([
     sb.from("teams").select("id,name,table_no,college,participants(count)").then(must),
     sb.from("scores").select("team_id,total").eq("checkpoint_id", cp.id).eq("judge_id", state.user.id).then(must),
     scope.on && state.me.role === "admin" ? sb.from("staff").select("email,name").then(must) : [],
+    sb.rpc("judged_teams", { p_checkpoint: cp.id }).then(must),
   ]);
+  // other judges who already scored each team in this round (names only)
+  const othersOf = new Map((judged || []).map((j) => [j.team_id, (j.judges || []).filter((x) => x.id !== state.user.id).map((x) => x.name)]));
+  const others = (id) => othersOf.get(id) || [];
   const teams = (scope.restricted ? allTeams.filter((t) => scope.allowed.has(t.id)) : allTeams).sort(byTable);
   const scored = new Map(mine.map((s) => [s.team_id, s.total]));
   const max = cp.criteria.reduce((n, c) => n + Number(c.max), 0);
@@ -1810,7 +1814,7 @@ async function viewJudge(main, cpId, teamId) {
       <div class="card"><h3>Scan any team member's QR</h3><div id="reader"></div>
         <div class="row" style="margin-top:10px"><button class="btn" id="cam">Start camera</button><span class="small muted" id="cam-st"></span></div></div>
       <div class="card"><div class="row" style="margin-bottom:10px"><h3 style="margin:0;flex:1">${scope.restricted ? "Your teams" : "Or pick a team"}</h3>
-        <select id="show" style="width:auto"><option value="">All</option><option value="todo">To judge</option><option value="done">Judged</option></select>
+        <select id="show" style="width:auto"><option value="">All</option><option value="todo">Not judged by me</option><option value="nobody">Not judged by anyone</option><option value="done">Judged by me</option></select>
         <input id="q" placeholder="Table or team…" style="max-width:170px"></div>
         <div class="judge-grid" id="tp"></div></div>
     </div>`}`;
@@ -1819,14 +1823,16 @@ async function viewJudge(main, cpId, teamId) {
     const q = $("#q").value.trim().toLowerCase(), show = $("#show").value;
     $("#tp").innerHTML = teams
       .filter((t) => `${t.table_no || ""} ${t.name} ${t.college || ""}`.toLowerCase().includes(q))
-      .filter((t) => !show || (show === "done") === scored.has(t.id))
+      .filter((t) => !show || (show === "nobody" ? !scored.has(t.id) && !others(t.id).length : (show === "done") === scored.has(t.id)))
       .map((t) => {
         const js = scope.on && state.me.role === "admin" ? judgesOf(t.id) : [];
         return `<button class="judge-card ${scored.has(t.id) ? "is-done" : ""}" data-t="${t.id}">
-          <span class="tno">${t.table_no ? `<small>Table</small>${esc(t.table_no)}` : "<small>Table</small>—"}</span>
+          <span class="tno ${!scored.has(t.id) && others(t.id).length ? "by-other" : ""}">${t.table_no ? `<small>Table</small>${esc(t.table_no)}` : "<small>Table</small>—"}</span>
           <span class="jt"><b>${esc(t.name)}</b><span class="small muted">${t.college ? esc(t.college) + " · " : ""}${t.participants[0]?.count ?? 0} members</span>
-            ${js.length ? `<span class="small muted">Judges: ${js.map(esc).join(", ")}</span>` : scope.on && state.me.role === "admin" ? '<span class="small" style="color:var(--warn)">No judge assigned</span>' : ""}</span>
-          ${scored.has(t.id) ? `<span class="badge ok">${scored.get(t.id)}/${max}</span>` : '<span class="badge">To judge</span>'}</button>`;
+            ${js.length ? `<span class="small muted">Judges: ${js.map(esc).join(", ")}</span>` : scope.on && state.me.role === "admin" ? '<span class="small" style="color:var(--warn)">No judge assigned</span>' : ""}
+            ${others(t.id).length ? `<span class="small already">✓ Judged by ${esc(others(t.id).join(", "))}</span>` : ""}</span>
+          ${scored.has(t.id) ? `<span class="badge ok">${scored.get(t.id)}/${max}</span>`
+            : others(t.id).length ? `<span class="badge warn" title="Already judged by ${esc(others(t.id).join(", "))}">Already judged</span>` : '<span class="badge">To judge</span>'}</button>`;
       }).join("") || '<div class="empty">No matching teams</div>';
   };
   draw();
@@ -1856,16 +1862,20 @@ async function judgeTeam(main, cp, teamId, scope) {
       <div class="card empty">This team isn't assigned to you in ${esc(cp.name)}. Ask an admin if that's wrong.</div>`;
     return;
   }
-  const [team, existing] = await Promise.all([
+  const [team, existing, judged] = await Promise.all([
     sb.from("teams").select("id,name,college,table_no,participants(name,is_leader)").eq("id", teamId).single().then(must),
     sb.from("scores").select("*").eq("checkpoint_id", cp.id).eq("team_id", teamId).eq("judge_id", state.user.id).maybeSingle().then(must),
+    sb.rpc("judged_teams", { p_checkpoint: cp.id }).then(must),
   ]);
+  const otherJudges = ((judged || []).find((j) => j.team_id === teamId)?.judges || []).filter((x) => x.id !== state.user.id).map((x) => x.name);
   const vals = existing?.scores || {};
   const max = cp.criteria.reduce((n, c) => n + Number(c.max), 0);
   main.innerHTML = `
     <div class="page-head"><div><a href="#/judge/${cp.id}" class="small">← All teams</a>
       <h1>${team.table_no ? `<span class="h-tno">Table ${esc(team.table_no)}</span> ` : ""}${esc(team.name)}</h1>
       <p class="muted">${esc(cp.name)}${team.college ? " · " + esc(team.college) : ""} · ${team.participants.map((p) => esc(p.name) + (p.is_leader ? " (lead)" : "")).join(", ")}</p></div></div>
+    ${otherJudges.length ? `<div class="notice" style="max-width:640px"><b>Already judged</b> in ${esc(cp.name)} by ${esc(otherJudges.join(", "))}.
+      ${existing ? "" : "You can still add your own score – the leaderboard averages all judges."}</div>` : ""}
     <form class="card" id="sf" style="max-width:640px">
       ${cp.criteria.map((c, i) => `<div class="crit"><div><label>${esc(c.name)} <span class="muted">/ ${c.max}</span></label>
         ${c.desc ? `<p class="crit-desc">${esc(c.desc)}</p>` : ""}
