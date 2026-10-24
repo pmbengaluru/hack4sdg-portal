@@ -84,6 +84,11 @@ The camera scanner needs **https**, which GitHub Pages provides.
    - **QR timing:** the code changes every 10 minutes, and anyone who scanned just before a change gets 2 more minutes to finish. A photo shared outside the room stops working.
    - **Names that can't be matched** appear under **Needs review**. Pick the right person and click **Mark present**.
    - The QR can also be switched on for any existing scan checkpoint, including Check-in.
+5c. **Attendance lists & Excel.** Open **Attendance** and pick a checkpoint.
+   - **Present** shows who was marked, when and by whom (a volunteer or the Attendance QR). **Not marked** lists who is missing, with phone numbers.
+   - **⬇ Download Excel** gives that checkpoint's Present and Not marked sheets.
+   - **⬇ Excel: all checkpoints** gives a summary with one row per person and a column per checkpoint, plus a sheet per checkpoint.
+   - Admins can **Remove** a check-in made by mistake.
 6. **Table numbers & judge assignments (optional).**
    - **Table numbers at check-in:** tick **Collect table numbers here** on the Check-in checkpoint. When a volunteer scans *anyone* from a team that has no table number, the scan screen asks for it once. Every later scan of that team shows "Table 12". Or open **Teams & QR → ✎ Table numbers**. Every team is listed with a number box: type a number and press Enter to save and jump to the next team. **Auto-number…** is there too.
    - **Settings → Assign mentors to teams**, or the switch on **Assign judges**:

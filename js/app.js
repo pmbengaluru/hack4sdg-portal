@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0736";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261024.0736";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0935";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261024.0935";
 
-const APP_VERSION = "20261024.0736"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261024.0935"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -138,15 +138,18 @@ function beep(ok = true) {
 }
 
 let sheetJs;
-async function readSpreadsheet(file) {
-  if (!/\.(xlsx|xls|ods)$/i.test(file.name)) return file.text();
+function loadSheetJs() {
   sheetJs ??= new Promise((ok, fail) => {
     const s = Object.assign(document.createElement("script"), { src: "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" });
     s.onload = () => ok(window.XLSX);
-    s.onerror = () => fail(new Error("Couldn't load the Excel reader – check your connection or upload a CSV."));
+    s.onerror = () => { sheetJs = null; fail(new Error("Couldn't load the Excel library – check your connection.")); };
     document.head.appendChild(s);
   });
-  const XLSX = await sheetJs;
+  return sheetJs;
+}
+async function readSpreadsheet(file) {
+  if (!/\.(xlsx|xls|ods)$/i.test(file.name)) return file.text();
+  const XLSX = await loadSheetJs();
   const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
   return XLSX.utils.sheet_to_csv(wb.Sheets[wb.SheetNames[0]], { blankrows: true });
 }
@@ -231,6 +234,7 @@ const ICON_PATHS = {
   account: '<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>',
   assign: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
   phone: '<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/>',
+  attendance: '<path d="M16 3h5v5M21 3l-7 7"/><path d="M8 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6"/><path d="m9 15 2 2 4-4"/><path d="M14 21h5a2 2 0 0 0 2-2v-5"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
   x: '<path d="M18 6 6 18M6 6l12 12"/>',
@@ -271,6 +275,7 @@ const ROUTES = {
   display: { label: "Attendance screen", roles: ["admin", "volunteer"], view: viewDisplay, hidden: true, fullscreen: true },
   judge: { label: "Judge", icon: "judge", roles: ["admin", "mentor"], view: viewJudge },
   assign: { label: "Assign judges", icon: "assign", roles: ["admin"], view: viewAssign },
+  attendance: { label: "Attendance", icon: "attendance", roles: ["admin", "volunteer"], view: viewAttendance },
   results: { label: "Results", icon: "results", roles: ["admin"], view: viewResults },
   settings: { label: "Settings", icon: "settings", roles: ["admin"], view: viewSettings },
   account: { label: "Account", icon: "account", roles: ["admin", "volunteer", "mentor"], view: viewAccount },
@@ -406,7 +411,7 @@ async function viewDashboard(main) {
       const pct = parts.length ? Math.round((n / parts.length) * 100) : 0;
       return `<tr><td><b>${esc(c.name)}</b>${cpWindow(c) ? `<br><span class="small muted">${esc(cpWindow(c))}</span> ${cpTimeBadge(c)}` : ""}</td><td><span class="badge info">Scan</span></td>
         <td>${c.active ? '<span class="badge ok">Open</span>' : '<span class="badge">Closed</span>'}</td>
-        <td style="min-width:160px"><div class="progress"><div style="width:${pct}%"></div></div><span class="small muted">${n} / ${parts.length} people</span></td></tr>`;
+        <td style="min-width:160px"><div class="progress"><div style="width:${pct}%"></div></div><span class="small muted">${n} / ${parts.length} people · <a href="#/attendance/${c.id}">see list</a></span></td></tr>`;
     }
     const n = new Set(scores.filter((s) => s.checkpoint_id === c.id).map((s) => s.team_id)).size;
     const pct = teams.length ? Math.round((n / teams.length) * 100) : 0;
@@ -1426,6 +1431,148 @@ async function viewScan(main, cpId) {
     }, 250);
   };
   $("#ms-res").onclick = (e) => { const b = e.target.closest("[data-tok]"); if (b) handle(b.dataset.tok); };
+}
+
+// ------------------------------------------------------------------ attendance (who was marked at each checkpoint)
+const fmtFull = (t) => (t ? new Date(t).toLocaleString([], { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "");
+const safeName = (s) => String(s).replace(/[^\w-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "sheet";
+
+async function attendanceData(cpId) {
+  const [scans, people] = await Promise.all([
+    sb.from("scans").select("id,participant_id,scanned_at,scanner_name").eq("checkpoint_id", cpId).order("scanned_at", { ascending: false }).then(must),
+    sb.from("participants").select("id,name,email,phone,is_leader,teams(name,table_no,college)").order("name").then(must),
+  ]);
+  const byId = new Map(people.map((p) => [p.id, p]));
+  const seen = new Set();
+  const present = scans.filter((s) => byId.has(s.participant_id)).map((s) => {
+    seen.add(s.participant_id);
+    return { ...byId.get(s.participant_id), scan_id: s.id, at: s.scanned_at, by: s.scanner_name || "Volunteer" };
+  });
+  const absent = people.filter((p) => !seen.has(p.id));
+  return { present, absent, total: people.length };
+}
+
+// worksheet with bold-ish header widths sized to the content
+function sheetFrom(XLSX, header, rows) {
+  const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+  ws["!cols"] = header.map((h, i) => ({ wch: Math.min(45, Math.max(String(h).length, ...rows.map((r) => String(r[i] ?? "").length)) + 2) }));
+  ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: rows.length, c: header.length - 1 } }) };
+  return ws;
+}
+// scans made through the attendance QR are stored as "Self check-in" / "Self check-in (confirmed)"
+const markedBy = (by) => (/self check-in \(confirmed\)/i.test(by) ? "Attendance QR (confirmed by staff)" : /self check-in/i.test(by) ? "Attendance QR" : by);
+const presentRow = (p, i) => [i + 1, p.name, p.teams?.name || "", p.teams?.table_no || "", p.teams?.college || "", p.email || "", p.phone || "", fmtFull(p.at), markedBy(p.by)];
+const PRESENT_HEAD = ["#", "Name", "Team", "Table", "College", "Email", "Phone", "Marked at", "Marked by"];
+const absentRow = (p, i) => [i + 1, p.name, p.teams?.name || "", p.teams?.table_no || "", p.teams?.college || "", p.email || "", p.phone || "", p.is_leader ? "Leader" : ""];
+const ABSENT_HEAD = ["#", "Name", "Team", "Table", "College", "Email", "Phone", "Role"];
+
+async function downloadAttendance(cp) {
+  const XLSX = await loadSheetJs();
+  const { present, absent } = await attendanceData(cp.id);
+  const byTeam = (a, b) => (a.teams?.name || "").localeCompare(b.teams?.name || "") || a.name.localeCompare(b.name);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, PRESENT_HEAD, [...present].sort(byTeam).map(presentRow)), "Present");
+  XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, ABSENT_HEAD, [...absent].sort(byTeam).map(absentRow)), "Not marked");
+  XLSX.writeFile(wb, `${safeName(state.settings.event_name || "Event")}_${safeName(cp.name)}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  return present.length;
+}
+
+async function downloadAllAttendance(cps) {
+  const XLSX = await loadSheetJs();
+  const data = await Promise.all(cps.map((c) => attendanceData(c.id)));
+  const people = [...data[0].present, ...data[0].absent]
+    .sort((a, b) => (a.teams?.name || "").localeCompare(b.teams?.name || "") || a.name.localeCompare(b.name));
+  const marks = data.map((d) => new Map(d.present.map((p) => [p.id, p.at])));
+  const summary = people.map((p) => [p.name, p.teams?.name || "", p.teams?.table_no || "", p.teams?.college || "",
+    ...marks.map((m) => (m.has(p.id) ? `✓ ${fmtFull(m.get(p.id))}` : "")), marks.filter((m) => m.has(p.id)).length]);
+  const totals = ["Total present", "", "", "", ...marks.map((m) => m.size), ""];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, ["Name", "Team", "Table", "College", ...cps.map((c) => c.name), "Checkpoints attended"], [...summary, [], totals]), "Summary");
+  const used = new Set(["Summary"]);
+  cps.forEach((c, i) => {
+    let name = c.name.replace(/[\\/?*[\]:]/g, " ").slice(0, 31);
+    while (used.has(name)) name = `${name.slice(0, 28)} ${i}`;
+    used.add(name);
+    XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, PRESENT_HEAD, data[i].present.map(presentRow)), name);
+  });
+  XLSX.writeFile(wb, `${safeName(state.settings.event_name || "Event")}_attendance_all_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
+async function viewAttendance(main, cpId, tabArg) {
+  const isAdmin = state.me.role === "admin";
+  const cps = (await getCheckpoints()).filter((c) => c.type === "scan");
+  if (!cps.length) {
+    main.innerHTML = `<h1>Attendance</h1><div class="card empty">No check-in or attendance checkpoints yet.${isAdmin ? ' <a href="#/checkpoints">Create one</a>.' : ""}</div>`;
+    return;
+  }
+  const cp = cps.find((c) => c.id === Number(cpId)) || cps[0];
+  let tab = tabArg === "absent" ? "absent" : "present";
+  const { present, absent, total } = await attendanceData(cp.id);
+  const viaQr = present.filter((p) => /self check-in/i.test(p.by)).length;
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Attendance</h1><p class="muted">Who has been marked at each checkpoint – by volunteers scanning passes or by the attendance QR.</p></div>
+      <div class="row"><select id="cp" style="width:auto;min-width:210px">${cps.map((c) => `<option value="${c.id}" ${c.id === cp.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>
+        <button class="btn primary" id="xl">⬇ Download Excel</button>
+        ${cps.length > 1 ? '<button class="btn" id="xl-all">⬇ Excel: all checkpoints</button>' : ""}</div></div>
+    <div class="grid stats" style="margin-bottom:16px">
+      <div class="stat"><div class="v">${present.length}</div><div class="l">Present at ${esc(cp.name)}</div></div>
+      <div class="stat"><div class="v">${absent.length}</div><div class="l">Not marked yet</div></div>
+      <div class="stat"><div class="v">${total ? Math.round((present.length / total) * 100) : 0}%</div><div class="l">of ${total} participants</div></div>
+      <div class="stat"><div class="v">${viaQr}</div><div class="l">Marked via attendance QR</div></div>
+    </div>
+    <div class="card">
+      <div class="row" style="margin-bottom:12px">
+        <div class="seg" role="tablist"><button type="button" data-tab="present">Present (${present.length})</button><button type="button" data-tab="absent">Not marked (${absent.length})</button></div>
+        <input id="q" class="grow" placeholder="Search name, team, table or college…">
+        <select id="sort" style="width:auto"><option value="time">Newest first</option><option value="team">By team</option><option value="table">By table</option><option value="name">By name</option></select>
+      </div>
+      <div id="att"></div>
+    </div>`;
+
+  const draw = () => {
+    $$(".seg [data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+    $("#sort").querySelector('[value="time"]').disabled = tab === "absent";
+    const q = $("#q").value.trim().toLowerCase(), sort = tab === "absent" && $("#sort").value === "time" ? "team" : $("#sort").value;
+    const list = (tab === "present" ? present : absent)
+      .filter((p) => !q || `${p.name} ${p.teams?.name || ""} ${p.teams?.table_no || ""} ${p.teams?.college || ""}`.toLowerCase().includes(q));
+    const cmp = {
+      time: (a, b) => new Date(b.at) - new Date(a.at),
+      team: (a, b) => (a.teams?.name || "").localeCompare(b.teams?.name || "") || a.name.localeCompare(b.name),
+      table: (a, b) => byTable({ table_no: a.teams?.table_no, name: a.teams?.name || "" }, { table_no: b.teams?.table_no, name: b.teams?.name || "" }) || a.name.localeCompare(b.name),
+      name: (a, b) => a.name.localeCompare(b.name),
+    }[sort];
+    list.sort(cmp);
+    $("#att").innerHTML = !list.length ? `<div class="empty">${q ? "No matches" : tab === "present" ? "Nobody has been marked here yet." : "Everyone has been marked 🎉"}</div>`
+      : `<div class="table-wrap"><table><thead><tr><th>#</th><th>Name</th><th>Team</th><th>Table</th>${tab === "present" ? "<th>Marked at</th><th>Marked by</th>" : "<th>Phone</th>"}${isAdmin && tab === "present" ? "<th></th>" : ""}</tr></thead><tbody>
+        ${list.map((p, i) => `<tr><td class="muted">${i + 1}</td><td><b>${esc(p.name)}</b>${p.is_leader ? ' <span class="badge brand">Lead</span>' : ""}</td>
+          <td>${esc(p.teams?.name || "")}${p.teams?.college ? `<br><span class="small muted">${esc(p.teams.college)}</span>` : ""}</td><td>${esc(p.teams?.table_no || "—")}</td>
+          ${tab === "present" ? `<td class="small">${fmtFull(p.at)}</td><td>${/self check-in/i.test(p.by) ? `<span class="badge info">${esc(markedBy(p.by))}</span>` : `<span class="small">${esc(p.by)}</span>`}</td>`
+            : `<td class="small">${p.phone ? `<a href="tel:${esc(p.phone.replace(/[^\d+]/g, ""))}">${esc(p.phone)}</a>` : "—"}</td>`}
+          ${isAdmin && tab === "present" ? `<td><button class="btn sm danger" data-undo="${p.scan_id}" title="Remove this check-in">Remove</button></td>` : ""}</tr>`).join("")}
+        </tbody></table></div>`;
+  };
+  draw();
+  $("#q").oninput = draw;
+  $("#sort").onchange = draw;
+  $(".seg").onclick = (e) => { const b = e.target.closest("[data-tab]"); if (b) { tab = b.dataset.tab; draw(); } };
+  $("#cp").onchange = (e) => (location.hash = `#/attendance/${e.target.value}`);
+  $("#att").onclick = async (e) => {
+    const b = e.target.closest("[data-undo]");
+    if (!b) return;
+    const p = present.find((x) => x.scan_id === Number(b.dataset.undo));
+    if (!(await confirmBox(`Remove <b>${esc(p.name)}</b> from ${esc(cp.name)}? They'll show as not marked.`, "Remove", true))) return;
+    try { must(await sb.from("scans").delete().eq("id", p.scan_id)); toast("Removed"); route(); } catch (er) { toast(er.message, "bad"); }
+  };
+  const busy = async (btn, fn) => {
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = "Preparing…";
+    try { await fn(); toast("Excel file downloaded", "ok"); } catch (er) { toast(er.message, "bad"); }
+    btn.disabled = false; btn.textContent = label;
+  };
+  $("#xl").onclick = (e) => busy(e.target, () => downloadAttendance(cp));
+  const all = $("#xl-all");
+  if (all) all.onclick = (e) => busy(e.target, () => downloadAllAttendance(cps));
 }
 
 // ------------------------------------------------------------------ self check-in (display screen + review)
