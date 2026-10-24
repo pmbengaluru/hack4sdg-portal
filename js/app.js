@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0942";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261024.0942";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.1736";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261024.1736";
 
-const APP_VERSION = "20261024.0942"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261024.1736"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -2171,8 +2171,24 @@ async function viewResults(main, cpId) {
     const r = main._rows.find((x) => x.t.id === Number(b.dataset.detail));
     modal(`<h2>${esc(r.t.name)}</h2>${r.s.map((s) => `<div class="card"><div class="row" style="justify-content:space-between"><b>${esc(s.judge_name || "Judge")}</b><b>${s.total}</b></div>
       <div class="small muted">${cp.criteria.map((c) => `${esc(c.name)}: ${s.scores?.[c.name] ?? 0}/${c.max}`).join(" · ")}</div>
-      ${s.comments ? `<p class="small" style="margin-bottom:0">${esc(s.comments)}</p>` : ""}</div>`).join("")}
-      <div class="actions"><button class="btn primary" data-close>Close</button></div>`);
+      ${s.comments ? `<p class="small" style="margin-bottom:0">${esc(s.comments)}</p>` : ""}
+      <div class="row" style="justify-content:space-between;margin-top:10px"><span class="small muted">${s.updated_at ? `Saved ${fmtTime(s.updated_at)}` : ""}</span>
+        <button type="button" class="btn sm danger" data-del-score="${s.id}">Delete score</button></div></div>`).join("")}
+      <div class="actions"><button class="btn primary" data-close>Close</button></div>`, (m, close) => {
+      m.addEventListener("click", async (ev) => {
+        const del = ev.target.closest("[data-del-score]");
+        if (!del) return;
+        const s = r.s.find((x) => x.id === Number(del.dataset.delScore));
+        if (!(await confirmBox(`Delete <b>${esc(s.judge_name || "this judge")}</b>'s score (${s.total}) for <b>${esc(r.t.name)}</b> in ${esc(cp.name)}? The judge can score this team again afterwards. This can't be undone.`, "Delete score", true))) return;
+        try {
+          const gone = must(await sb.from("scores").delete().eq("id", s.id).select("id"));
+          if (!gone.length) throw new Error("Only admins can delete scores");
+          toast(`Deleted ${s.judge_name || "judge"}'s score for ${r.t.name}`, "ok");
+          close();
+          route();
+        } catch (er) { toast(er.message, "bad"); }
+      });
+    });
   };
   $("#exp-scores") && ($("#exp-scores").onclick = () => download(`scores_${cp.name.replace(/\W+/g, "_")}.csv`, toCSV([
     ["Team", "Judge", ...cp.criteria.map((c) => `${c.name} (/${c.max})`), "Total", "Comments", "Updated"],
