@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0709";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261024.0709";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0714";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261024.0714";
 
-const APP_VERSION = "20261024.0709"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261024.0714"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -267,8 +267,8 @@ const ROUTES = {
   staff: { label: "Staff", icon: "staff", roles: ["admin"], view: viewStaff },
   emails: { label: "QR emails", icon: "emails", roles: ["admin"], view: viewEmails },
   scan: { label: "Scan", icon: "scan", roles: ["admin", "volunteer"], view: viewScan },
-  selfcheckin: { label: "Self check-in", icon: "phone", roles: ["admin", "volunteer"], view: viewSelfCheckin },
-  display: { label: "Check-in screen", roles: ["admin", "volunteer"], view: viewDisplay, hidden: true, fullscreen: true },
+  selfcheckin: { label: "Attendance QR", icon: "phone", roles: ["admin", "volunteer"], view: viewSelfCheckin },
+  display: { label: "Attendance screen", roles: ["admin", "volunteer"], view: viewDisplay, hidden: true, fullscreen: true },
   judge: { label: "Judge", icon: "judge", roles: ["admin", "mentor"], view: viewJudge },
   assign: { label: "Assign judges", icon: "assign", roles: ["admin"], view: viewAssign },
   results: { label: "Results", icon: "results", roles: ["admin"], view: viewResults },
@@ -1025,7 +1025,7 @@ async function viewCheckpoints(main) {
     <td>${c.type === "scan" ? '<span class="badge info">QR scan · volunteers</span>' : '<span class="badge warn">Judging · mentors</span>'}${c.ask_table ? '<br><span class="badge">collects table no.</span>' : ""}</td>
     <td class="small">${c.type === "judging" ? c.criteria.map((x) => `${esc(x.name)} (${x.max})`).join(", ") : "—"}</td>
     <td><button class="btn sm" data-toggle="${c.id}">${c.active ? "✓ Open" : "Closed"}</button></td>
-    <td class="row">${c.type === "judging" ? `<a class="btn sm" href="#/assign/${c.id}">Assign judges</a>` : `<a class="btn sm" href="#/selfcheckin/${c.id}">Self check-in</a>`}<button class="btn sm" data-edit="${c.id}">Edit</button></td></tr>`;
+    <td class="row">${c.type === "judging" ? `<a class="btn sm" href="#/assign/${c.id}">Assign judges</a>` : `<a class="btn sm" href="#/selfcheckin/${c.id}">Attendance QR</a>`}<button class="btn sm" data-edit="${c.id}">Edit</button></td></tr>`;
   main.innerHTML = `
     <div class="page-head"><div><h1>Checkpoints</h1><p class="muted">Mark each checkpoint as a <b>QR scan</b> (volunteers) or <b>judging</b> round (mentors grade teams).</p></div>
       <button class="btn primary" id="new">+ New checkpoint</button></div>
@@ -1429,9 +1429,10 @@ async function viewScan(main, cpId) {
 }
 
 // ------------------------------------------------------------------ self check-in (display screen + review)
-// Same code as public.self_code_ok(): first 10 hex chars of sha256(secret + ":" + 30-second window).
+// Same code as public.self_code_ok(): first 10 hex chars of sha256(secret + ":" + 5-minute window).
+const QR_WINDOW = 300;
 async function selfCode(secret, at = Date.now()) {
-  const win = Math.floor(at / 1000 / 30);
+  const win = Math.floor(at / 1000 / QR_WINDOW);
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${secret}:${win}`));
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 10);
 }
@@ -1445,8 +1446,8 @@ async function viewDisplay(main, cpId) {
     return;
   }
   if (!cp.self_checkin || !cp.active) {
-    main.innerHTML = `<div class="display-msg"><img src="assets/logo.png" alt="" class="display-logo"><h1>Self check-in is off for ${esc(cp.name)}</h1>
-      <p class="muted">${cp.active ? "Turn it on from the Self check-in page." : "This checkpoint is closed."}</p><a class="btn primary" href="#/selfcheckin/${cp.id}">Open Self check-in settings</a></div>`;
+    main.innerHTML = `<div class="display-msg"><img src="assets/logo.png" alt="" class="display-logo"><h1>The attendance QR is off for ${esc(cp.name)}</h1>
+      <p class="muted">${cp.active ? "Turn it on from the Attendance QR page." : "This sheet is closed."}</p><a class="btn primary" href="#/selfcheckin/${cp.id}">Open Attendance QR</a></div>`;
     return;
   }
   const { count: total } = await sb.from("participants").select("id", { count: "exact", head: true });
@@ -1460,15 +1461,15 @@ async function viewDisplay(main, cpId) {
         <div class="display-qr">
           <div class="qr-frame" id="qr"></div>
           <div class="qr-timer"><div class="qr-timer-bar" id="qbar"></div></div>
-          <p class="small muted" style="text-align:center;margin:8px 0 0">Code refreshes every 30 seconds</p>
+          <p class="small muted" style="text-align:center;margin:8px 0 0">New code in <b id="qleft">5:00</b> · changes every 5 minutes</p>
         </div>
         <div class="display-info">
           <span class="badge info">${esc(cp.name)}</span>
-          <h1 class="display-title">Scan to check in</h1>
-          <ol class="display-steps"><li>Open your phone camera and scan the code</li><li>Pick your <b>team</b> and type your <b>name</b></li><li>Tap <b>Check in</b> – done!</li></ol>
-          <div class="display-count"><span id="dc">0</span><small>/ ${total} checked in</small></div>
+          <h1 class="display-title">Scan to mark your attendance</h1>
+          <ol class="display-steps"><li>Open your phone camera and scan the code</li><li>Pick your <b>team</b> and type your <b>name</b></li><li>Tap <b>Mark me present</b> – done!</li></ol>
+          <div class="display-count"><span id="dc">0</span><small>/ ${total} present</small></div>
           <div class="progress" style="height:14px"><div id="dbar"></div></div>
-          <h3 style="margin-top:22px">Just arrived</h3>
+          <h3 style="margin-top:22px">Just marked present</h3>
           <div id="recent" class="display-recent"></div>
         </div>
       </div>
@@ -1479,10 +1480,12 @@ async function viewDisplay(main, cpId) {
     $("#qr") && ($("#qr").innerHTML = qrSvg(selfUrl(cp, code)));
   };
   const tickBar = () => {
-    const left = 30 - (Math.floor(Date.now() / 1000) % 30);
+    const left = QR_WINDOW - (Math.floor(Date.now() / 1000) % QR_WINDOW);
     const bar = $("#qbar");
-    if (bar) bar.style.width = `${(left / 30) * 100}%`;
-    if (left === 30) drawQr();
+    if (bar) bar.style.width = `${(left / QR_WINDOW) * 100}%`;
+    const t = $("#qleft");
+    if (t) t.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+    if (left === QR_WINDOW) drawQr();
   };
   const stats = async () => {
     const [{ count }, rows] = await Promise.all([
@@ -1493,7 +1496,7 @@ async function viewDisplay(main, cpId) {
     $("#dc").textContent = count ?? 0;
     $("#dbar").style.width = `${total ? ((count ?? 0) / total) * 100 : 0}%`;
     $("#recent").innerHTML = rows.map((r) => `<div class="arrival"><b>${esc((r.participants?.name || "").split(" ")[0])}</b>
-      <span>${esc(r.participants?.teams?.name || "")}</span><time>${fmtTime(r.scanned_at).split(", ").pop()}</time></div>`).join("") || '<p class="muted">Waiting for the first check-in…</p>';
+      <span>${esc(r.participants?.teams?.name || "")}</span><time>${fmtTime(r.scanned_at).split(", ").pop()}</time></div>`).join("") || '<p class="muted">Waiting for the first person…</p>';
   };
   await drawQr();
   tickBar();
@@ -1503,11 +1506,35 @@ async function viewDisplay(main, cpId) {
   $("#fs").onclick = () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.());
 }
 
+// One click: a new scan checkpoint used as an attendance sheet, with the attendance QR already on.
+function newAttendanceSheet() {
+  const hh = new Date().getHours();
+  const guess = hh < 12 ? "Morning attendance" : hh < 17 ? "Mid-day attendance" : "Evening attendance";
+  modal(`<h2>New attendance sheet</h2>
+    <form id="nas"><div class="field"><label>Name</label><input name="name" required value="${guess}"></div>
+      <p class="small muted">Creates a separate attendance list (it doesn't touch check-in) and turns the attendance QR on.</p>
+      <div class="actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create &amp; open</button></div></form>`, (m, close) => {
+    $("input", m).select();
+    $("#nas", m).onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const row = must(await sb.from("checkpoints").insert({ name: new FormData(e.target).get("name").trim(), type: "scan", self_checkin: true, active: true, sort_order: 50 }).select().single());
+        close();
+        toast("Attendance sheet created", "ok");
+        location.hash = `#/selfcheckin/${row.id}`;
+      } catch (er) { toast(er.message, "bad"); }
+    };
+  });
+}
+
 async function viewSelfCheckin(main, cpId) {
   const isAdmin = state.me.role === "admin";
   const cps = (await getCheckpoints()).filter((c) => c.type === "scan");
   if (!cps.length) {
-    main.innerHTML = `<h1>Self check-in</h1><div class="card empty">No scan checkpoints yet.${isAdmin ? ' <a href="#/checkpoints">Create one (e.g. Check-in)</a>.' : ""}</div>`;
+    main.innerHTML = `<h1>Attendance QR</h1><div class="card empty">No attendance sheets yet.
+      ${isAdmin ? '<br><br><button class="btn primary" id="new-sheet">+ New attendance sheet</button>' : " Ask an admin to create one."}</div>`;
+    const ns = $("#new-sheet");
+    if (ns) ns.onclick = () => newAttendanceSheet();
     return;
   }
   const cp = cps.find((c) => c.id === Number(cpId)) || cps.find((c) => c.self_checkin) || cps[0];
@@ -1516,20 +1543,21 @@ async function viewSelfCheckin(main, cpId) {
     sb.from("participants").select("id,name,team_id,teams(name,table_no)").order("name").then(must),
   ]);
   const pending = log.filter((r) => r.status === "unmatched");
-  const label = { matched: ["ok", "Checked in"], already: ["", "Already in"], unmatched: ["warn", "Needs review"], resolved: ["ok", "Confirmed"], dismissed: ["", "Dismissed"] };
+  const label = { matched: ["ok", "Present"], already: ["", "Already marked"], unmatched: ["warn", "Needs review"], resolved: ["ok", "Confirmed"], dismissed: ["", "Dismissed"] };
 
   main.innerHTML = `
-    <div class="page-head"><div><h1>Self check-in</h1><p class="muted">Show a QR on a screen – participants scan it and type their name and team. No volunteer scanning needed.</p></div>
-      <select id="cp" style="width:auto;min-width:200px">${cps.map((c) => `<option value="${c.id}" ${c.id === cp.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></div>
+    <div class="page-head"><div><h1>Attendance QR</h1><p class="muted">Take attendance during the event: show a QR on the screen, participants scan it and enter their name and team. No volunteer scanning.</p></div>
+      <div class="row"><select id="cp" style="width:auto;min-width:200px">${cps.map((c) => `<option value="${c.id}" ${c.id === cp.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>
+        ${isAdmin ? '<button class="btn" id="new-sheet">+ New attendance sheet</button>' : ""}</div></div>
     <div class="card assign-mode ${cp.self_checkin ? "on" : ""}">
       ${isAdmin ? `<label class="switch"><input type="checkbox" id="mode" ${cp.self_checkin ? "checked" : ""}><span class="slider"></span></label>` : ""}
-      <div style="flex:1"><b>Self check-in is ${cp.self_checkin ? "ON" : "OFF"} for ${esc(cp.name)}</b><br><span class="small muted">${cp.self_checkin
-        ? "Open the display screen on a projector or TV. The QR changes every 30 seconds, so a photo of it stops working after a few minutes."
-        : isAdmin ? "Switch on, then open the display screen." : "Ask an admin to switch it on."}${cp.active ? "" : " This checkpoint is closed, so nobody can check in."}</span></div>
+      <div style="flex:1"><b>Attendance QR is ${cp.self_checkin ? "ON" : "OFF"} for ${esc(cp.name)}</b><br><span class="small muted">${cp.self_checkin
+        ? "Open the display screen on a projector or TV. The QR changes every 5 minutes, so a photo shared outside the room stops working."
+        : isAdmin ? "Switch on, then open the display screen." : "Ask an admin to switch it on."}${cp.active ? "" : " This sheet is closed, so nobody can mark attendance."}</span></div>
       ${cp.self_checkin ? `<a class="btn primary" href="#/display/${cp.id}" target="_blank" rel="noopener">Open display screen ↗</a>` : ""}
     </div>
     <div class="card"><h2>Needs review <span class="badge ${pending.length ? "warn" : "ok"}">${pending.length}</span></h2>
-      <p class="small muted" style="margin-top:0">Names we couldn't match to the registration list (typos, nicknames, wrong team). Pick the right person to check them in.</p>
+      <p class="small muted" style="margin-top:0">Names we couldn't match to the registration list (typos, nicknames, wrong team). Pick the right person to mark them present.</p>
       <div id="review">${pending.length ? pending.map((r) => {
         const sameTeam = r.team_id ? people.filter((p) => p.team_id === r.team_id) : [];
         return `<div class="review-row" data-id="${r.id}">
@@ -1539,24 +1567,26 @@ async function viewSelfCheckin(main, cpId) {
             ${sameTeam.length ? `<optgroup label="${esc(sameTeam[0].teams?.name)}">${sameTeam.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}</optgroup>` : ""}
             <optgroup label="Everyone">${people.map((p) => `<option value="${p.id}">${esc(p.name)} – ${esc(p.teams?.name || "")}</option>`).join("")}</optgroup>
           </select>
-          <button class="btn sm primary" data-ok="${r.id}">Check in</button><button class="btn sm" data-dismiss="${r.id}">Dismiss</button>
+          <button class="btn sm primary" data-ok="${r.id}">Mark present</button><button class="btn sm" data-dismiss="${r.id}">Dismiss</button>
         </div>`;
       }).join("") : '<div class="empty">Nothing to review 🎉</div>'}</div>
     </div>
-    <div class="card"><h2>Recent self check-ins</h2>
+    <div class="card"><h2>Recent entries</h2>
       ${log.length ? `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Typed name</th><th>Typed team</th><th>Matched to</th><th>Status</th></tr></thead><tbody>
       ${log.slice(0, 60).map((r) => {
         const p = people.find((x) => x.id === r.participant_id);
         const [cls, txt] = label[r.status] || ["", r.status];
         return `<tr><td class="small">${fmtTime(r.created_at)}</td><td>${esc(r.name_text)}</td><td>${esc(r.team_text)}</td>
           <td>${p ? `${esc(p.name)} <span class="small muted">· ${esc(p.teams?.name || "")}</span>` : "—"}</td><td><span class="badge ${cls}">${txt}</span></td></tr>`;
-      }).join("")}</tbody></table></div>` : '<div class="empty">No self check-ins yet.</div>'}
+      }).join("")}</tbody></table></div>` : '<div class="empty">Nobody has marked attendance yet.</div>'}
     </div>`;
 
   $("#cp").onchange = (e) => (location.hash = `#/selfcheckin/${e.target.value}`);
+  const ns = $("#new-sheet");
+  if (ns) ns.onclick = () => newAttendanceSheet();
   const mode = $("#mode");
   if (mode) mode.onchange = async () => {
-    try { must(await sb.from("checkpoints").update({ self_checkin: mode.checked }).eq("id", cp.id)); toast(mode.checked ? "Self check-in on" : "Self check-in off", "ok"); route(); }
+    try { must(await sb.from("checkpoints").update({ self_checkin: mode.checked }).eq("id", cp.id)); toast(mode.checked ? "Attendance QR on" : "Attendance QR off", "ok"); route(); }
     catch (er) { toast(er.message, "bad"); mode.checked = !mode.checked; }
   };
   $("#review").onclick = async (e) => {
@@ -1567,7 +1597,7 @@ async function viewSelfCheckin(main, cpId) {
         if (!pid) return toast("Pick who this is first", "bad");
         const r = must(await sb.rpc("resolve_self_checkin", { p_id: Number(ok.dataset.ok), p_participant: pid }));
         if (r.status !== "ok") throw new Error(r.message || "Could not confirm");
-        toast(`${r.name} checked in`, "ok"); route();
+        toast(`${r.name} marked present`, "ok"); route();
       }
       if (dis) {
         must(await sb.from("self_checkins").update({ status: "dismissed" }).eq("id", Number(dis.dataset.dismiss)));

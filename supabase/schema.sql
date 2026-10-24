@@ -359,18 +359,20 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------
--- Self check-in (public, no login). The display screen shows a QR whose code changes every
--- 30 s: code = first 10 hex chars of sha256(self_secret || ':' || 30-second window). Codes stay
--- valid for ~3 minutes so people have time to fill in the form.
+-- Attendance QR / self check-in (public, no login). The display screen shows a QR whose code changes
+-- every 5 minutes: code = first 10 hex chars of sha256(self_secret || ':' || 5-minute window).
+-- A code works for its own 5 minutes plus a 2-minute grace so people who scanned late can finish the form.
 -- ---------------------------------------------------------------
 create or replace function public.norm_text(t text) returns text
 language sql immutable as $$ select regexp_replace(lower(coalesce(t, '')), '[^a-z0-9]', '', 'g') $$;
 
 create or replace function public.self_code_ok(cp public.checkpoints, p_code text) returns boolean
 language sql stable as $$
+  with t as (select extract(epoch from now()) as e)
   select exists (
-    select 1 from generate_series(0, 6) g
-    where left(encode(sha256(convert_to(cp.self_secret || ':' || (floor(extract(epoch from now()) / 30)::bigint - g)::text, 'UTF8')), 'hex'), 10)
+    select 1 from t, (values (0), (1)) g(back)
+    where (g.back = 0 or t.e - floor(t.e / 300) * 300 < 120)   -- previous window only in the first 2 minutes
+      and left(encode(sha256(convert_to(cp.self_secret || ':' || (floor(t.e / 300)::bigint - g.back)::text, 'UTF8')), 'hex'), 10)
           = lower(coalesce(p_code, ''))
   )
 $$;
