@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.1828";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261024.1828";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.1829";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261024.1829";
 
-const APP_VERSION = "20261024.1828"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261024.1829"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -2157,10 +2157,12 @@ async function viewResults(main, cpId) {
       const per = cp.criteria.map((c) => (s.length ? s.reduce((n, x) => n + Number(x.scores?.[c.name] || 0), 0) / s.length : null));
       return { t, s, avg, per };
     }).sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1));
-    board = `<div class="table-wrap"><table><thead><tr><th>#</th><th>Team</th><th>Avg total / ${max}</th><th>Judges</th>
+    board = `<div class="table-wrap"><table><thead><tr><th>#</th><th>Team</th><th>Avg total / ${max}</th><th>Judged by</th>
       ${cp.criteria.map((c) => `<th>${esc(c.name)}</th>`).join("")}<th></th></tr></thead><tbody>
       ${rows.map((r, i) => `<tr><td>${r.avg == null ? "" : i + 1}</td><td><b>${esc(r.t.name)}</b>${r.t.table_no ? ` <span class="small muted">· Table ${esc(r.t.table_no)}</span>` : ""}</td>
-        <td>${r.avg == null ? '<span class="muted">not graded</span>' : `<b>${r.avg.toFixed(2)}</b>`}</td><td>${r.s.length}</td>
+        <td>${r.avg == null ? '<span class="muted">not graded</span>' : `<b>${r.avg.toFixed(2)}</b>`}</td>
+        <td>${r.s.length ? `<div class="judged-by">${[...r.s].sort((a, b) => (a.judge_name || "").localeCompare(b.judge_name || ""))
+          .map((x) => `<span class="jb" title="${esc(x.judge_name || "Judge")} gave ${x.total}${x.updated_at ? ` · ${fmtTime(x.updated_at)}` : ""}">${esc(x.judge_name || "Judge")} <b>${x.total}</b></span>`).join("")}</div>` : '<span class="muted">—</span>'}</td>
         ${r.per.map((v) => `<td>${v == null ? "" : v.toFixed(1)}</td>`).join("")}
         <td>${r.s.length ? `<button class="btn sm" data-detail="${r.t.id}">Details</button>` : ""}</td></tr>`).join("")}
       </tbody></table></div>`;
