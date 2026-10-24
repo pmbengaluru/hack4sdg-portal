@@ -1,6 +1,6 @@
 // Public attendance page (no login). Opened from the QR on the display screen:
 // checkin.html?c=<checkpoint id>&k=<rotating code>
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0714";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0722";
 
 const box = document.getElementById("ci");
 const params = new URLSearchParams(location.search);
@@ -79,7 +79,7 @@ function form(info) {
         btn.disabled = false; btn.textContent = "Mark me present";
         alert(r.message);
       } else if (r.status === "expired") {
-        result("bad", "This QR code has expired", "Please scan the code on the screen again – it changes every 5 minutes.");
+        result("bad", "This QR code has expired", "Please scan the code on the screen again – it changes every 10 minutes.");
       } else {
         result("bad", "Attendance is closed", "Please ask a volunteer.");
       }
@@ -98,7 +98,7 @@ async function start() {
     window.CI_INFO = info;
     if (info.status === "ok") return done ? showDone(done, true) : form(info);
     if (done) return showDone(done, true);
-    if (info.status === "expired") return result("bad", "This QR code has expired", "Please scan the code on the screen again – it changes every 5 minutes.");
+    if (info.status === "expired") return result("bad", "This QR code has expired", "Please scan the code on the screen again – it changes every 10 minutes.");
     return result("bad", "Attendance is closed", "Please ask a volunteer.");
   } catch (er) {
     result("bad", "Couldn't reach the server", `${esc(er.message)}. Check your connection and try again.`);

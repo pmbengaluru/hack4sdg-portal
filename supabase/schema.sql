@@ -360,8 +360,8 @@ end $$;
 
 -- ---------------------------------------------------------------
 -- Attendance QR / self check-in (public, no login). The display screen shows a QR whose code changes
--- every 5 minutes: code = first 10 hex chars of sha256(self_secret || ':' || 5-minute window).
--- A code works for its own 5 minutes plus a 2-minute grace so people who scanned late can finish the form.
+-- every 10 minutes: code = first 10 hex chars of sha256(self_secret || ':' || 10-minute window).
+-- A code works for its own 10 minutes plus a 2-minute grace so people who scanned late can finish the form.
 -- ---------------------------------------------------------------
 create or replace function public.norm_text(t text) returns text
 language sql immutable as $$ select regexp_replace(lower(coalesce(t, '')), '[^a-z0-9]', '', 'g') $$;
@@ -371,8 +371,8 @@ language sql stable as $$
   with t as (select extract(epoch from now()) as e)
   select exists (
     select 1 from t, (values (0), (1)) g(back)
-    where (g.back = 0 or t.e - floor(t.e / 300) * 300 < 120)   -- previous window only in the first 2 minutes
-      and left(encode(sha256(convert_to(cp.self_secret || ':' || (floor(t.e / 300)::bigint - g.back)::text, 'UTF8')), 'hex'), 10)
+    where (g.back = 0 or t.e - floor(t.e / 600) * 600 < 120)   -- previous window only in the first 2 minutes
+      and left(encode(sha256(convert_to(cp.self_secret || ':' || (floor(t.e / 600)::bigint - g.back)::text, 'UTF8')), 'hex'), 10)
           = lower(coalesce(p_code, ''))
   )
 $$;

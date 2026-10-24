@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0714";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261024.0714";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0722";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261024.0722";
 
-const APP_VERSION = "20261024.0714"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261024.0722"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -1429,8 +1429,8 @@ async function viewScan(main, cpId) {
 }
 
 // ------------------------------------------------------------------ self check-in (display screen + review)
-// Same code as public.self_code_ok(): first 10 hex chars of sha256(secret + ":" + 5-minute window).
-const QR_WINDOW = 300;
+// Same code as public.self_code_ok(): first 10 hex chars of sha256(secret + ":" + 10-minute window).
+const QR_WINDOW = 600;
 async function selfCode(secret, at = Date.now()) {
   const win = Math.floor(at / 1000 / QR_WINDOW);
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${secret}:${win}`));
@@ -1461,7 +1461,7 @@ async function viewDisplay(main, cpId) {
         <div class="display-qr">
           <div class="qr-frame" id="qr"></div>
           <div class="qr-timer"><div class="qr-timer-bar" id="qbar"></div></div>
-          <p class="small muted" style="text-align:center;margin:8px 0 0">New code in <b id="qleft">5:00</b> · changes every 5 minutes</p>
+          <p class="small muted" style="text-align:center;margin:8px 0 0">New code in <b id="qleft">10:00</b> · changes every 10 minutes</p>
         </div>
         <div class="display-info">
           <span class="badge info">${esc(cp.name)}</span>
@@ -1552,7 +1552,7 @@ async function viewSelfCheckin(main, cpId) {
     <div class="card assign-mode ${cp.self_checkin ? "on" : ""}">
       ${isAdmin ? `<label class="switch"><input type="checkbox" id="mode" ${cp.self_checkin ? "checked" : ""}><span class="slider"></span></label>` : ""}
       <div style="flex:1"><b>Attendance QR is ${cp.self_checkin ? "ON" : "OFF"} for ${esc(cp.name)}</b><br><span class="small muted">${cp.self_checkin
-        ? "Open the display screen on a projector or TV. The QR changes every 5 minutes, so a photo shared outside the room stops working."
+        ? "Open the display screen on a projector or TV. The QR changes every 10 minutes, so a photo shared outside the room stops working."
         : isAdmin ? "Switch on, then open the display screen." : "Ask an admin to switch it on."}${cp.active ? "" : " This sheet is closed, so nobody can mark attendance."}</span></div>
       ${cp.self_checkin ? `<a class="btn primary" href="#/display/${cp.id}" target="_blank" rel="noopener">Open display screen ↗</a>` : ""}
     </div>

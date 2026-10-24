@@ -81,7 +81,7 @@ The camera scanner needs **https**, which GitHub Pages provides.
 5. **Scan.** Volunteers open the site on their phone, pick the checkpoint and scan. A green screen means checked in; a yellow screen means already scanned (it shows when and by whom).
 5b. **Attendance QR (mid-event attendance, no volunteer scanning).** Open **Attendance QR** and click **+ New attendance sheet**, e.g. "Mid-day attendance". This creates a separate list that doesn't touch check-in, with the QR already on. Click **Open display screen**, put it on the projector and press **Full screen**.
    - **On the participant's phone:** they scan the QR, pick their team, type their name and tap **Mark me present**.
-   - **QR timing:** the code changes every 5 minutes, and anyone who scanned just before a change gets 2 more minutes to finish. A photo shared outside the room stops working.
+   - **QR timing:** the code changes every 10 minutes, and anyone who scanned just before a change gets 2 more minutes to finish. A photo shared outside the room stops working.
    - **Names that can't be matched** appear under **Needs review**. Pick the right person and click **Mark present**.
    - The QR can also be switched on for any existing scan checkpoint, including Check-in.
 6. **Table numbers & judge assignments (optional).**
