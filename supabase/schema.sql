@@ -56,6 +56,22 @@ alter table public.checkpoints add column if not exists starts_at timestamptz;
 alter table public.checkpoints add column if not exists ends_at   timestamptz;
 -- scan checkpoints only: volunteers are asked for the team's table number when it has none (e.g. at check-in)
 alter table public.checkpoints add column if not exists ask_table boolean not null default false;
+-- self check-in: participants scan a QR shown on a screen and type their own name + team
+alter table public.checkpoints add column if not exists self_checkin boolean not null default false;
+alter table public.checkpoints add column if not exists self_secret text not null default md5(random()::text || clock_timestamp()::text);
+
+create table if not exists public.self_checkins (
+  id             bigint generated always as identity primary key,
+  checkpoint_id  bigint not null references public.checkpoints(id) on delete cascade,
+  team_text      text not null,
+  name_text      text not null,
+  team_id        bigint references public.teams(id) on delete set null,
+  participant_id bigint references public.participants(id) on delete set null,
+  status         text not null check (status in ('matched','already','unmatched','resolved','dismissed')),
+  device_id      text,
+  created_at     timestamptz not null default now()
+);
+create index if not exists self_checkins_cp_idx on public.self_checkins (checkpoint_id, status);
 
 create table if not exists public.scans (
   id             bigint generated always as identity primary key,
@@ -153,12 +169,13 @@ alter table public.scans        enable row level security;
 alter table public.scores       enable row level security;
 alter table public.settings     enable row level security;
 alter table public.judge_assignments enable row level security;
+alter table public.self_checkins enable row level security;
 
 do $$
 declare t text;
 begin
   -- drop old policies so the file can be re-run
-  for t in select unnest(array['staff','teams','participants','checkpoints','scans','scores','settings','judge_assignments']) loop
+  for t in select unnest(array['staff','teams','participants','checkpoints','scans','scores','settings','judge_assignments','self_checkins']) loop
     execute (select coalesce(string_agg(format('drop policy if exists %I on public.%I;', policyname, t), ' '), '')
              from pg_policies where schemaname = 'public' and tablename = t);
   end loop;
@@ -196,6 +213,10 @@ create policy scores_update on public.scores for update to authenticated
 -- judge assignments: staff can see them (mentors need their list), admins manage
 create policy assign_read  on public.judge_assignments for select to authenticated using (public.has_role('admin','volunteer','mentor'));
 create policy assign_admin on public.judge_assignments for all    to authenticated using (public.has_role('admin')) with check (public.has_role('admin'));
+
+-- self check-ins: written only by self_checkin(); staff can read; admins/volunteers resolve
+create policy selfci_read  on public.self_checkins for select to authenticated using (public.has_role('admin','volunteer','mentor'));
+create policy selfci_write on public.self_checkins for update to authenticated using (public.has_role('admin','volunteer')) with check (public.has_role('admin','volunteer'));
 create policy scores_delete on public.scores for delete to authenticated using (public.has_role('admin'));
 
 -- ---------------------------------------------------------------
@@ -337,6 +358,140 @@ begin
   return jsonb_build_object('status','ok','table_no',v);
 end $$;
 
+-- ---------------------------------------------------------------
+-- Self check-in (public, no login). The display screen shows a QR whose code changes every
+-- 30 s: code = first 10 hex chars of sha256(self_secret || ':' || 30-second window). Codes stay
+-- valid for ~3 minutes so people have time to fill in the form.
+-- ---------------------------------------------------------------
+create or replace function public.norm_text(t text) returns text
+language sql immutable as $$ select regexp_replace(lower(coalesce(t, '')), '[^a-z0-9]', '', 'g') $$;
+
+create or replace function public.self_code_ok(cp public.checkpoints, p_code text) returns boolean
+language sql stable as $$
+  select exists (
+    select 1 from generate_series(0, 6) g
+    where left(encode(sha256(convert_to(cp.self_secret || ':' || (floor(extract(epoch from now()) / 30)::bigint - g)::text, 'UTF8')), 'hex'), 10)
+          = lower(coalesce(p_code, ''))
+  )
+$$;
+
+create or replace function public.self_checkin_info(p_checkpoint bigint, p_code text)
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare cp public.checkpoints;
+begin
+  select * into cp from public.checkpoints where id = p_checkpoint;
+  if cp.id is null or cp.type <> 'scan' or not cp.self_checkin or not cp.active then
+    return jsonb_build_object('status','closed');
+  end if;
+  if not public.self_code_ok(cp, p_code) then return jsonb_build_object('status','expired'); end if;
+  return jsonb_build_object('status','ok', 'checkpoint', cp.name,
+    'event', (select value from public.settings where key = 'event_name'),
+    'teams', (select coalesce(jsonb_agg(name order by name), '[]'::jsonb) from public.teams));
+end $$;
+
+create or replace function public.self_checkin(p_checkpoint bigint, p_code text, p_team text, p_name text, p_device text default null)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  cp public.checkpoints;
+  v_team public.teams;
+  v_p public.participants;
+  n_team text := public.norm_text(p_team);
+  n_name text := public.norm_text(p_name);
+  first_tok text := public.norm_text(split_part(trim(coalesce(p_name, '')), ' ', 1));
+  cand bigint[];
+  cnt int;
+  existing public.scans;
+begin
+  select * into cp from public.checkpoints where id = p_checkpoint;
+  if cp.id is null or cp.type <> 'scan' or not cp.self_checkin or not cp.active then
+    return jsonb_build_object('status','closed');
+  end if;
+  if not public.self_code_ok(cp, p_code) then return jsonb_build_object('status','expired'); end if;
+  if length(n_team) < 1 or length(n_name) < 2 or length(p_team) > 120 or length(p_name) > 120 then
+    return jsonb_build_object('status','invalid','message','Please enter your full name and team name.');
+  end if;
+
+  -- candidate teams: same name ignoring case/spaces/punctuation (there can be several, e.g. "Brain Wave" and
+  -- "BrainWave"), else up to 3 teams whose name contains / is contained in the typed text
+  select array_agg(id) into cand from public.teams where public.norm_text(name) = n_team;
+  if cand is null and length(n_team) >= 4 then
+    select array_agg(id) into cand from public.teams
+     where public.norm_text(name) like '%' || n_team || '%' or n_team like '%' || public.norm_text(name) || '%';
+    if coalesce(array_length(cand, 1), 0) > 3 then cand := null; end if;
+  end if;
+
+  -- the person, across those teams: exact name, else a unique first name, else a unique partial match
+  if cand is not null then
+    select count(*) into cnt from public.participants where team_id = any(cand) and public.norm_text(name) = n_name;
+    if cnt = 1 then
+      select * into v_p from public.participants where team_id = any(cand) and public.norm_text(name) = n_name;
+    end if;
+    if v_p.id is null and length(first_tok) >= 2 then
+      select count(*) into cnt from public.participants
+       where team_id = any(cand) and public.norm_text(split_part(trim(name), ' ', 1)) = first_tok;
+      if cnt = 1 then
+        select * into v_p from public.participants
+         where team_id = any(cand) and public.norm_text(split_part(trim(name), ' ', 1)) = first_tok;
+      end if;
+    end if;
+    if v_p.id is null and length(n_name) >= 3 then
+      select count(*) into cnt from public.participants
+       where team_id = any(cand) and (public.norm_text(name) like '%' || n_name || '%' or n_name like '%' || public.norm_text(name) || '%');
+      if cnt = 1 then
+        select * into v_p from public.participants
+         where team_id = any(cand) and (public.norm_text(name) like '%' || n_name || '%' or n_name like '%' || public.norm_text(name) || '%');
+      end if;
+    end if;
+  end if;
+  if v_p.id is not null then
+    select * into v_team from public.teams where id = v_p.team_id;
+  elsif array_length(cand, 1) = 1 then
+    select * into v_team from public.teams where id = cand[1];
+  end if;
+
+  if v_p.id is null then
+    insert into public.self_checkins (checkpoint_id, team_text, name_text, team_id, status, device_id)
+    values (cp.id, trim(p_team), trim(p_name), v_team.id, 'unmatched', left(p_device, 64));
+    return jsonb_build_object('status','pending', 'team_found', cand is not null);
+  end if;
+
+  select * into existing from public.scans where checkpoint_id = cp.id and participant_id = v_p.id;
+  if existing.id is not null then
+    insert into public.self_checkins (checkpoint_id, team_text, name_text, team_id, participant_id, status, device_id)
+    values (cp.id, trim(p_team), trim(p_name), v_team.id, v_p.id, 'already', left(p_device, 64));
+    return jsonb_build_object('status','already', 'name', v_p.name, 'team', v_team.name, 'table_no', v_team.table_no, 'at', existing.scanned_at);
+  end if;
+
+  insert into public.scans (checkpoint_id, participant_id, scanner_name) values (cp.id, v_p.id, 'Self check-in');
+  insert into public.self_checkins (checkpoint_id, team_text, name_text, team_id, participant_id, status, device_id)
+  values (cp.id, trim(p_team), trim(p_name), v_team.id, v_p.id, 'matched', left(p_device, 64));
+  return jsonb_build_object('status','ok', 'name', v_p.name, 'team', v_team.name, 'table_no', v_team.table_no);
+end $$;
+
+-- staff resolve an unmatched self check-in by picking the right participant
+create or replace function public.resolve_self_checkin(p_id bigint, p_participant bigint)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare sc public.self_checkins; v_name text;
+begin
+  if not public.has_role('admin','volunteer') then return jsonb_build_object('status','forbidden'); end if;
+  select * into sc from public.self_checkins where id = p_id;
+  if sc.id is null then return jsonb_build_object('status','error','message','Not found'); end if;
+  insert into public.scans (checkpoint_id, participant_id, scanned_by, scanner_name)
+  values (sc.checkpoint_id, p_participant, auth.uid(), 'Self check-in (confirmed)')
+  on conflict (checkpoint_id, participant_id) do nothing;
+  update public.self_checkins set status = 'resolved', participant_id = p_participant,
+    team_id = (select team_id from public.participants where id = p_participant) where id = p_id;
+  select name into v_name from public.participants where id = p_participant;
+  return jsonb_build_object('status','ok','name',v_name);
+end $$;
+
+revoke execute on function public.self_checkin_info(bigint, text) from public;
+revoke execute on function public.self_checkin(bigint, text, text, text, text) from public;
+grant  execute on function public.self_checkin_info(bigint, text) to anon, authenticated;
+grant  execute on function public.self_checkin(bigint, text, text, text, text) to anon, authenticated;
+revoke execute on function public.resolve_self_checkin(bigint, bigint) from anon, public;
+grant  execute on function public.resolve_self_checkin(bigint, bigint) to authenticated;
+revoke execute on function public.self_code_ok(public.checkpoints, text) from anon, public;
 revoke execute on function public.set_table_no(bigint, text, boolean) from anon, public;
 grant  execute on function public.set_table_no(bigint, text, boolean) to authenticated;
 revoke execute on function public.scan_participant(bigint, text) from anon, public;

@@ -1,12 +1,12 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261023.2307";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261023.2307";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0709";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261024.0709";
 
-const APP_VERSION = "20261023.2307"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261024.0709"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
-const state = { user: null, me: null, settings: {}, scanner: null };
+const state = { user: null, me: null, settings: {}, scanner: null, timers: [] };
 
 // ------------------------------------------------------------------ helpers
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -230,6 +230,7 @@ const ICON_PATHS = {
   settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
   account: '<circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/>',
   assign: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
+  phone: '<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
   x: '<path d="M18 6 6 18M6 6l12 12"/>',
@@ -266,6 +267,8 @@ const ROUTES = {
   staff: { label: "Staff", icon: "staff", roles: ["admin"], view: viewStaff },
   emails: { label: "QR emails", icon: "emails", roles: ["admin"], view: viewEmails },
   scan: { label: "Scan", icon: "scan", roles: ["admin", "volunteer"], view: viewScan },
+  selfcheckin: { label: "Self check-in", icon: "phone", roles: ["admin", "volunteer"], view: viewSelfCheckin },
+  display: { label: "Check-in screen", roles: ["admin", "volunteer"], view: viewDisplay, hidden: true, fullscreen: true },
   judge: { label: "Judge", icon: "judge", roles: ["admin", "mentor"], view: viewJudge },
   assign: { label: "Assign judges", icon: "assign", roles: ["admin"], view: viewAssign },
   results: { label: "Results", icon: "results", roles: ["admin"], view: viewResults },
@@ -290,6 +293,9 @@ async function route() {
   $$(".nav a, .mnav a").forEach((a) => a.classList.toggle("active", a.dataset.r === name));
   $(".mnav a.active")?.scrollIntoView({ inline: "center", block: "nearest", behavior: reduceMotion() ? "auto" : "smooth" });
   $("#viz-tip")?.classList.remove("on");
+  state.timers.forEach(clearInterval);
+  state.timers = [];
+  document.body.classList.toggle("display-mode", !!r.fullscreen);
   const main = $("#main");
   main.classList.remove("page-in");
   main.innerHTML = SKELETON;
@@ -1019,7 +1025,7 @@ async function viewCheckpoints(main) {
     <td>${c.type === "scan" ? '<span class="badge info">QR scan · volunteers</span>' : '<span class="badge warn">Judging · mentors</span>'}${c.ask_table ? '<br><span class="badge">collects table no.</span>' : ""}</td>
     <td class="small">${c.type === "judging" ? c.criteria.map((x) => `${esc(x.name)} (${x.max})`).join(", ") : "—"}</td>
     <td><button class="btn sm" data-toggle="${c.id}">${c.active ? "✓ Open" : "Closed"}</button></td>
-    <td class="row">${c.type === "judging" ? `<a class="btn sm" href="#/assign/${c.id}">Assign judges</a>` : ""}<button class="btn sm" data-edit="${c.id}">Edit</button></td></tr>`;
+    <td class="row">${c.type === "judging" ? `<a class="btn sm" href="#/assign/${c.id}">Assign judges</a>` : `<a class="btn sm" href="#/selfcheckin/${c.id}">Self check-in</a>`}<button class="btn sm" data-edit="${c.id}">Edit</button></td></tr>`;
   main.innerHTML = `
     <div class="page-head"><div><h1>Checkpoints</h1><p class="muted">Mark each checkpoint as a <b>QR scan</b> (volunteers) or <b>judging</b> round (mentors grade teams).</p></div>
       <button class="btn primary" id="new">+ New checkpoint</button></div>
@@ -1420,6 +1426,155 @@ async function viewScan(main, cpId) {
     }, 250);
   };
   $("#ms-res").onclick = (e) => { const b = e.target.closest("[data-tok]"); if (b) handle(b.dataset.tok); };
+}
+
+// ------------------------------------------------------------------ self check-in (display screen + review)
+// Same code as public.self_code_ok(): first 10 hex chars of sha256(secret + ":" + 30-second window).
+async function selfCode(secret, at = Date.now()) {
+  const win = Math.floor(at / 1000 / 30);
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${secret}:${win}`));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 10);
+}
+const selfUrl = (cp, code) => new URL(`checkin.html?c=${cp.id}&k=${code}`, document.baseURI).href;
+const pageTimer = (fn, ms) => state.timers.push(setInterval(fn, ms));
+
+async function viewDisplay(main, cpId) {
+  const cp = must(await sb.from("checkpoints").select("*").eq("id", Number(cpId)).maybeSingle());
+  if (!cp || cp.type !== "scan") {
+    main.innerHTML = `<div class="display-msg"><h1>Checkpoint not found</h1><a class="btn" href="#/selfcheckin">Back</a></div>`;
+    return;
+  }
+  if (!cp.self_checkin || !cp.active) {
+    main.innerHTML = `<div class="display-msg"><img src="assets/logo.png" alt="" class="display-logo"><h1>Self check-in is off for ${esc(cp.name)}</h1>
+      <p class="muted">${cp.active ? "Turn it on from the Self check-in page." : "This checkpoint is closed."}</p><a class="btn primary" href="#/selfcheckin/${cp.id}">Open Self check-in settings</a></div>`;
+    return;
+  }
+  const { count: total } = await sb.from("participants").select("id", { count: "exact", head: true });
+  main.innerHTML = `
+    <div class="display">
+      <div class="display-top">
+        <img src="assets/logo.png" alt="HACK4SDG" class="display-logo">
+        <div class="display-tools"><button class="btn sm" id="fs">⛶ Full screen</button><a class="btn sm" href="#/selfcheckin/${cp.id}">Exit</a></div>
+      </div>
+      <div class="display-grid">
+        <div class="display-qr">
+          <div class="qr-frame" id="qr"></div>
+          <div class="qr-timer"><div class="qr-timer-bar" id="qbar"></div></div>
+          <p class="small muted" style="text-align:center;margin:8px 0 0">Code refreshes every 30 seconds</p>
+        </div>
+        <div class="display-info">
+          <span class="badge info">${esc(cp.name)}</span>
+          <h1 class="display-title">Scan to check in</h1>
+          <ol class="display-steps"><li>Open your phone camera and scan the code</li><li>Pick your <b>team</b> and type your <b>name</b></li><li>Tap <b>Check in</b> – done!</li></ol>
+          <div class="display-count"><span id="dc">0</span><small>/ ${total} checked in</small></div>
+          <div class="progress" style="height:14px"><div id="dbar"></div></div>
+          <h3 style="margin-top:22px">Just arrived</h3>
+          <div id="recent" class="display-recent"></div>
+        </div>
+      </div>
+    </div>`;
+
+  const drawQr = async () => {
+    const code = await selfCode(cp.self_secret);
+    $("#qr") && ($("#qr").innerHTML = qrSvg(selfUrl(cp, code)));
+  };
+  const tickBar = () => {
+    const left = 30 - (Math.floor(Date.now() / 1000) % 30);
+    const bar = $("#qbar");
+    if (bar) bar.style.width = `${(left / 30) * 100}%`;
+    if (left === 30) drawQr();
+  };
+  const stats = async () => {
+    const [{ count }, rows] = await Promise.all([
+      sb.from("scans").select("id", { count: "exact", head: true }).eq("checkpoint_id", cp.id),
+      sb.from("scans").select("scanned_at,participants(name,teams(name))").eq("checkpoint_id", cp.id).order("scanned_at", { ascending: false }).limit(6).then(must),
+    ]);
+    if (!$("#dc")) return;
+    $("#dc").textContent = count ?? 0;
+    $("#dbar").style.width = `${total ? ((count ?? 0) / total) * 100 : 0}%`;
+    $("#recent").innerHTML = rows.map((r) => `<div class="arrival"><b>${esc((r.participants?.name || "").split(" ")[0])}</b>
+      <span>${esc(r.participants?.teams?.name || "")}</span><time>${fmtTime(r.scanned_at).split(", ").pop()}</time></div>`).join("") || '<p class="muted">Waiting for the first check-in…</p>';
+  };
+  await drawQr();
+  tickBar();
+  stats();
+  pageTimer(tickBar, 1000);
+  pageTimer(stats, 8000);
+  $("#fs").onclick = () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.());
+}
+
+async function viewSelfCheckin(main, cpId) {
+  const isAdmin = state.me.role === "admin";
+  const cps = (await getCheckpoints()).filter((c) => c.type === "scan");
+  if (!cps.length) {
+    main.innerHTML = `<h1>Self check-in</h1><div class="card empty">No scan checkpoints yet.${isAdmin ? ' <a href="#/checkpoints">Create one (e.g. Check-in)</a>.' : ""}</div>`;
+    return;
+  }
+  const cp = cps.find((c) => c.id === Number(cpId)) || cps.find((c) => c.self_checkin) || cps[0];
+  const [log, people] = await Promise.all([
+    sb.from("self_checkins").select("*").eq("checkpoint_id", cp.id).order("created_at", { ascending: false }).limit(300).then(must),
+    sb.from("participants").select("id,name,team_id,teams(name,table_no)").order("name").then(must),
+  ]);
+  const pending = log.filter((r) => r.status === "unmatched");
+  const label = { matched: ["ok", "Checked in"], already: ["", "Already in"], unmatched: ["warn", "Needs review"], resolved: ["ok", "Confirmed"], dismissed: ["", "Dismissed"] };
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Self check-in</h1><p class="muted">Show a QR on a screen – participants scan it and type their name and team. No volunteer scanning needed.</p></div>
+      <select id="cp" style="width:auto;min-width:200px">${cps.map((c) => `<option value="${c.id}" ${c.id === cp.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></div>
+    <div class="card assign-mode ${cp.self_checkin ? "on" : ""}">
+      ${isAdmin ? `<label class="switch"><input type="checkbox" id="mode" ${cp.self_checkin ? "checked" : ""}><span class="slider"></span></label>` : ""}
+      <div style="flex:1"><b>Self check-in is ${cp.self_checkin ? "ON" : "OFF"} for ${esc(cp.name)}</b><br><span class="small muted">${cp.self_checkin
+        ? "Open the display screen on a projector or TV. The QR changes every 30 seconds, so a photo of it stops working after a few minutes."
+        : isAdmin ? "Switch on, then open the display screen." : "Ask an admin to switch it on."}${cp.active ? "" : " This checkpoint is closed, so nobody can check in."}</span></div>
+      ${cp.self_checkin ? `<a class="btn primary" href="#/display/${cp.id}" target="_blank" rel="noopener">Open display screen ↗</a>` : ""}
+    </div>
+    <div class="card"><h2>Needs review <span class="badge ${pending.length ? "warn" : "ok"}">${pending.length}</span></h2>
+      <p class="small muted" style="margin-top:0">Names we couldn't match to the registration list (typos, nicknames, wrong team). Pick the right person to check them in.</p>
+      <div id="review">${pending.length ? pending.map((r) => {
+        const sameTeam = r.team_id ? people.filter((p) => p.team_id === r.team_id) : [];
+        return `<div class="review-row" data-id="${r.id}">
+          <div class="review-typed"><b>${esc(r.name_text)}</b><span class="small muted">typed team: ${esc(r.team_text)} · ${fmtTime(r.created_at)}</span></div>
+          <select data-pick="${r.id}" class="grow">
+            <option value="">Who is this?</option>
+            ${sameTeam.length ? `<optgroup label="${esc(sameTeam[0].teams?.name)}">${sameTeam.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}</optgroup>` : ""}
+            <optgroup label="Everyone">${people.map((p) => `<option value="${p.id}">${esc(p.name)} – ${esc(p.teams?.name || "")}</option>`).join("")}</optgroup>
+          </select>
+          <button class="btn sm primary" data-ok="${r.id}">Check in</button><button class="btn sm" data-dismiss="${r.id}">Dismiss</button>
+        </div>`;
+      }).join("") : '<div class="empty">Nothing to review 🎉</div>'}</div>
+    </div>
+    <div class="card"><h2>Recent self check-ins</h2>
+      ${log.length ? `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Typed name</th><th>Typed team</th><th>Matched to</th><th>Status</th></tr></thead><tbody>
+      ${log.slice(0, 60).map((r) => {
+        const p = people.find((x) => x.id === r.participant_id);
+        const [cls, txt] = label[r.status] || ["", r.status];
+        return `<tr><td class="small">${fmtTime(r.created_at)}</td><td>${esc(r.name_text)}</td><td>${esc(r.team_text)}</td>
+          <td>${p ? `${esc(p.name)} <span class="small muted">· ${esc(p.teams?.name || "")}</span>` : "—"}</td><td><span class="badge ${cls}">${txt}</span></td></tr>`;
+      }).join("")}</tbody></table></div>` : '<div class="empty">No self check-ins yet.</div>'}
+    </div>`;
+
+  $("#cp").onchange = (e) => (location.hash = `#/selfcheckin/${e.target.value}`);
+  const mode = $("#mode");
+  if (mode) mode.onchange = async () => {
+    try { must(await sb.from("checkpoints").update({ self_checkin: mode.checked }).eq("id", cp.id)); toast(mode.checked ? "Self check-in on" : "Self check-in off", "ok"); route(); }
+    catch (er) { toast(er.message, "bad"); mode.checked = !mode.checked; }
+  };
+  $("#review").onclick = async (e) => {
+    const ok = e.target.closest("[data-ok]"), dis = e.target.closest("[data-dismiss]");
+    try {
+      if (ok) {
+        const pid = Number($(`[data-pick="${ok.dataset.ok}"]`).value);
+        if (!pid) return toast("Pick who this is first", "bad");
+        const r = must(await sb.rpc("resolve_self_checkin", { p_id: Number(ok.dataset.ok), p_participant: pid }));
+        if (r.status !== "ok") throw new Error(r.message || "Could not confirm");
+        toast(`${r.name} checked in`, "ok"); route();
+      }
+      if (dis) {
+        must(await sb.from("self_checkins").update({ status: "dismissed" }).eq("id", Number(dis.dataset.dismiss)));
+        toast("Dismissed"); route();
+      }
+    } catch (er) { toast(er.message, "bad"); }
+  };
 }
 
 // ------------------------------------------------------------------ judging
