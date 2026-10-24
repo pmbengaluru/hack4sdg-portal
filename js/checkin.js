@@ -1,6 +1,6 @@
 // Public attendance page (no login). Opened from the QR on the display screen:
 // checkin.html?c=<checkpoint id>&k=<rotating code>
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0722";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0736";
 
 const box = document.getElementById("ci");
 const params = new URLSearchParams(location.search);
@@ -42,18 +42,86 @@ function showDone(r, again = false) {
   document.getElementById("another").onclick = () => form(window.CI_INFO);
 }
 
+// Team search box: as people type, a dropdown lists matching teams (ignores case, spaces and punctuation).
+const squash = (t) => t.toLowerCase().replace(/[^a-z0-9]/g, "");
+function teamSearch(teams) {
+  const input = document.getElementById("team");
+  const list = document.getElementById("team-list");
+  let shown = [], active = -1;
+
+  // highlight the typed letters inside the team name, even when spaces/punctuation differ
+  const mark = (name, q) => {
+    const qs = squash(q);
+    if (!qs) return esc(name);
+    const map = [];
+    let flat = "";
+    [...name].forEach((ch, i) => { const c = squash(ch); if (c) { flat += c; map.push(i); } });
+    const at = flat.indexOf(qs);
+    if (at < 0) return esc(name);
+    const from = map[at], to = map[at + qs.length - 1] + 1;
+    return `${esc(name.slice(0, from))}<mark>${esc(name.slice(from, to))}</mark>${esc(name.slice(to))}`;
+  };
+  const open = (on) => { list.hidden = !on; input.setAttribute("aria-expanded", String(on)); };
+  const render = () => {
+    const q = input.value.trim(), qs = squash(q);
+    shown = (qs ? teams.filter((t) => squash(t).includes(qs)) : teams)
+      .sort((a, b) => (qs ? squash(b).startsWith(qs) - squash(a).startsWith(qs) : 0) || a.localeCompare(b))
+      .slice(0, 50);
+    active = shown.length && qs ? 0 : -1;
+    list.innerHTML = shown.length
+      ? shown.map((t, i) => `<li role="option" id="team-opt-${i}" data-i="${i}" aria-selected="${i === active}">${mark(t, q)}</li>`).join("")
+      : `<li class="combo-empty">No team matches “${esc(q)}”. Check the spelling, or keep typing your full team name.</li>`;
+    input.setAttribute("aria-activedescendant", active >= 0 ? `team-opt-${active}` : "");
+    open(true);
+  };
+  const move = (d) => {
+    if (!shown.length) return;
+    active = (active + d + shown.length) % shown.length;
+    [...list.children].forEach((li, i) => li.setAttribute("aria-selected", String(i === active)));
+    list.children[active]?.scrollIntoView({ block: "nearest" });
+    input.setAttribute("aria-activedescendant", `team-opt-${active}`);
+  };
+  const choose = (i) => {
+    input.value = shown[i];
+    open(false);
+    document.getElementById("name").focus();
+  };
+
+  input.addEventListener("input", render);
+  input.addEventListener("focus", render);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); list.hidden ? render() : move(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); move(-1); }
+    else if (e.key === "Enter" && !list.hidden && active >= 0) { e.preventDefault(); choose(active); }
+    else if (e.key === "Escape") open(false);
+  });
+  // pointerdown so the tap lands before the input loses focus
+  list.addEventListener("pointerdown", (e) => {
+    const li = e.target.closest("[data-i]");
+    if (!li) return;
+    e.preventDefault();
+    choose(Number(li.dataset.i));
+  });
+  input.addEventListener("blur", () => setTimeout(() => open(false), 120));
+}
+
 function form(info) {
   box.className = "card ci-card";
   box.innerHTML = `
     <h1>Mark attendance</h1>
     <p class="muted" style="margin-top:0">${esc(info.event || "")} · ${esc(info.checkpoint)}</p>
     <form id="f" autocomplete="on">
-      <div class="field float"><input id="team" name="team" list="teams" required maxlength="120" placeholder=" " autocomplete="off"><label for="team">Team name</label></div>
-      <datalist id="teams">${(info.teams || []).map((t) => `<option value="${esc(t)}">`).join("")}</datalist>
+      <div class="field float combo">
+        <input id="team" name="team" required maxlength="120" placeholder=" " autocomplete="off" autocapitalize="off" spellcheck="false"
+          role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="team-list">
+        <label for="team">Search your team</label>
+        <ul id="team-list" class="combo-list" role="listbox" hidden></ul>
+      </div>
       <div class="field float"><input id="name" name="name" required maxlength="120" placeholder=" " autocomplete="name"><label for="name">Your full name</label></div>
       <button class="btn primary lg block">Mark me present</button>
-      <p class="small muted" style="margin-bottom:0">Use the name you registered with. Start typing your team and pick it from the list.</p>
+      <p class="small muted" style="margin-bottom:0">Start typing your team name and tap it in the list. Use the name you registered with.</p>
     </form>`;
+  teamSearch(info.teams || []);
   const last = store.get(`ci-team-${cp}`);
   if (last) document.getElementById("team").value = last;
   document.getElementById(last ? "name" : "team").focus();

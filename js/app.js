@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0722";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261024.0722";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0736";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261024.0736";
 
-const APP_VERSION = "20261024.0722"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261024.0736"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 

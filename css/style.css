@@ -331,6 +331,15 @@ body.display-mode .main { max-width: none; padding: 24px clamp(16px, 3vw, 48px);
 .ci-table { margin: 14px auto 0; width: fit-content; text-align: center; padding: 10px 26px; border-radius: 18px; background: var(--grad); color: #fff; font-size: 2.6rem; font-weight: 800; line-height: 1.05; }
 .ci-table small { display: block; font-size: .72rem; text-transform: uppercase; letter-spacing: .1em; opacity: .85; font-weight: 700; }
 .ci-foot { text-align: center; }
+.combo { position: relative; }
+.combo-list { position: absolute; z-index: 20; left: 0; right: 0; top: calc(100% + 6px); margin: 0; padding: 6px; list-style: none;
+  max-height: min(300px, 45vh); overflow-y: auto; background: var(--panel-solid); border: 1.5px solid var(--line); border-radius: 14px;
+  box-shadow: var(--shadow-lg); animation: rise .2s var(--ease); }
+.combo-list li { padding: 12px 12px; border-radius: 10px; cursor: pointer; font-weight: 600; }
+.combo-list li[aria-selected="true"], .combo-list li:hover { background: var(--brand-soft); color: var(--brand); }
+.combo-list li mark { background: none; color: var(--blue); text-decoration: underline; text-underline-offset: 3px; font-weight: 800; }
+.combo-list li.combo-empty { cursor: default; font-weight: 500; color: var(--muted); }
+.combo-list li.combo-empty:hover { background: none; color: var(--muted); }
 
 /* ---------- quick table-number entry */
 .tno-input { width: 110px; font-weight: 800; font-size: 1.05rem; text-align: center; padding: 7px 8px; }
