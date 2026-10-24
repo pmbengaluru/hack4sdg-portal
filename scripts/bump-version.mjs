@@ -3,11 +3,11 @@
 import fs from "node:fs";
 
 const v = new Date().toISOString().replace(/[-:]/g, "").replace("T", ".").slice(0, 13); // e.g. 20261024.0315
-const files = ["index.html", "js/app.js", "checkin.html", "js/checkin.js"];
+const files = ["index.html", "js/app.js", "checkin.html", "js/checkin.js", "leaderboard.html", "js/leaderboard.js"];
 for (const f of files) {
   const before = fs.readFileSync(f, "utf8");
   const after = before
-    .replace(/(css\/style\.css|js\/app\.js|js\/checkin\.js|config\.js|csv\.js)(\?v=[\w.]+)?(["'])/g, `$1?v=${v}$3`)
+    .replace(/(css\/style\.css|js\/app\.js|js\/checkin\.js|js\/leaderboard\.js|config\.js|csv\.js)(\?v=[\w.]+)?(["'])/g, `$1?v=${v}$3`)
     .replace(/(const APP_VERSION = ")[^"]*(")/, `$1${v}$2`);
   fs.writeFileSync(f, after);
 }

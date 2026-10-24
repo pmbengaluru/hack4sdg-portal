@@ -510,6 +510,41 @@ $$;
 revoke execute on function public.judged_teams(bigint) from anon, public;
 grant  execute on function public.judged_teams(bigint) to authenticated;
 
+-- ---------------------------------------------------------------
+-- Public leaderboard (no login). Admins publish a snapshot from the Leaderboard page into
+-- settings.public_leaderboard_data; this returns it only while settings.public_leaderboard = 'on',
+-- and strips the scores unless settings.public_show_points = 'on'. (anon can't read settings directly.)
+-- ---------------------------------------------------------------
+insert into public.settings (key, value) values ('public_leaderboard', 'off'), ('public_show_points', 'off')
+on conflict (key) do nothing;
+
+create or replace function public.public_leaderboard()
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare
+  ev text := (select value from public.settings where key = 'event_name');
+  pts boolean := coalesce((select value from public.settings where key = 'public_show_points'), 'off') = 'on';
+  data jsonb;
+begin
+  if coalesce((select value from public.settings where key = 'public_leaderboard'), 'off') <> 'on' then
+    return jsonb_build_object('status', 'off', 'event', ev);
+  end if;
+  begin
+    data := (select value from public.settings where key = 'public_leaderboard_data')::jsonb;
+  exception when others then data := null;
+  end;
+  if data is null or jsonb_typeof(data->'rows') <> 'array' then
+    return jsonb_build_object('status', 'empty', 'event', ev);
+  end if;
+  return jsonb_build_object(
+    'status', 'ok', 'event', ev, 'show_points', pts,
+    'title', data->'title', 'updated_at', data->'updated_at',
+    'scale', case when pts then data->'scale' end,
+    'rows', (select coalesce(jsonb_agg(case when pts then r.v else r.v - 'score' end order by r.n), '[]'::jsonb)
+             from jsonb_array_elements(data->'rows') with ordinality as r(v, n)));
+end $$;
+revoke execute on function public.public_leaderboard() from public;
+grant  execute on function public.public_leaderboard() to anon, authenticated;
+
 revoke execute on function public.set_table_no(bigint, text, boolean) from anon, public;
 grant  execute on function public.set_table_no(bigint, text, boolean) to authenticated;
 revoke execute on function public.scan_participant(bigint, text) from anon, public;

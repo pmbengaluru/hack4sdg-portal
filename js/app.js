@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.2245";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261024.2245";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.2252";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261024.2252";
 
-const APP_VERSION = "20261024.2245"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261024.2252"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -2229,6 +2229,7 @@ async function viewLeaderboard(main) {
         <p class="small muted" style="margin-bottom:0">Within a round, a team's score is always the average of its judges' totals.</p>
       </form>
       <div class="lb-main">
+        <div class="card pub-card" id="pub"></div>
         <div id="lb-podium" class="podium"></div>
         <div class="card"><div class="row" style="margin-bottom:8px"><h2 style="margin:0;flex:1" id="lb-title"></h2>
           <input id="lb-q" placeholder="Find a team…" style="max-width:200px"></div>
@@ -2272,6 +2273,70 @@ async function viewLeaderboard(main) {
   form.addEventListener("input", draw);
   form.addEventListener("change", draw);
   $("#lb-q").oninput = draw;
+
+  // ---- public leaderboard: participants scan a QR, no login; shows the last published snapshot
+  const publicUrl = new URL("leaderboard.html", document.baseURI).href;
+  let snap = null;
+  try { snap = JSON.parse(state.settings.public_leaderboard_data || "null"); } catch { /* none yet */ }
+  const setSetting = async (key, value) => {
+    must(await sb.from("settings").upsert({ key, value }));
+    state.settings[key] = value;
+  };
+  const publish = async () => {
+    readCfg();
+    const { rows, used } = computeLeaderboard(teams, rounds, scores, cfg);
+    snap = {
+      updated_at: new Date().toISOString(),
+      title: `${cfg.mode === "sum" ? "Total" : "Average"} of ${used.map((r) => r.name).join(" + ")}`,
+      scale: cfg.scale,
+      rows: rows.map((r) => ({ rank: r.rank, team: r.t.name, table: r.t.table_no || null, college: r.t.college || null,
+        ...(r.score == null ? {} : { score: Math.round(r.score * 100) / 100 }) })),
+    };
+    await setSetting("public_leaderboard_data", JSON.stringify(snap));
+  };
+  const drawPublic = () => {
+    const on = state.settings.public_leaderboard === "on", pts = state.settings.public_show_points === "on";
+    $("#pub").innerHTML = `
+      <div class="pub-head">
+        <div class="pub-switches">
+          <div class="pub-sw"><label class="switch"><input type="checkbox" id="pub-on" ${on ? "checked" : ""}><span class="slider"></span></label>
+            <div><b>Public leaderboard ${on ? "ON" : "OFF"}</b><br><span class="small muted">${on ? "Anyone with the link or QR can see the ranking – no login." : "Participants can't see the ranking yet."}</span></div></div>
+          <div class="pub-sw"><label class="switch"><input type="checkbox" id="pub-pts" ${pts ? "checked" : ""}><span class="slider"></span></label>
+            <div><b>Show points</b><br><span class="small muted">${pts ? "Scores are shown next to each team." : "Only the ranking is shown, no scores."}</span></div></div>
+        </div>
+        <div class="pub-qr" title="Scan to open the public leaderboard">${qrSvg(publicUrl)}</div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" id="pub-publish">${snap ? "Update public ranking" : "Publish current ranking"}</button>
+        <button class="btn" id="pub-big">Show QR full screen</button>
+        <a class="btn" href="${esc(publicUrl)}" target="_blank" rel="noopener">Open public page ↗</a>
+        <button class="btn" id="pub-copy">Copy link</button>
+        <span class="small muted">${snap ? `Public page shows the ranking published ${fmtTime(snap.updated_at)} (${esc(snap.title)}).` : "Nothing published yet."}</span>
+      </div>`;
+    $("#pub-on").onchange = async (e) => {
+      try {
+        if (e.target.checked && !snap) await publish();
+        await setSetting("public_leaderboard", e.target.checked ? "on" : "off");
+        toast(e.target.checked ? "Public leaderboard is live" : "Public leaderboard hidden", "ok");
+      } catch (er) { toast(er.message, "bad"); }
+      drawPublic();
+    };
+    $("#pub-pts").onchange = async (e) => {
+      try { await setSetting("public_show_points", e.target.checked ? "on" : "off"); toast(e.target.checked ? "Points are now public" : "Points hidden", "ok"); }
+      catch (er) { toast(er.message, "bad"); }
+      drawPublic();
+    };
+    $("#pub-publish").onclick = async () => {
+      try { await publish(); toast("Public ranking updated", "ok"); } catch (er) { toast(er.message, "bad"); }
+      drawPublic();
+    };
+    $("#pub-copy").onclick = () => { navigator.clipboard?.writeText(publicUrl); toast("Link copied"); };
+    $("#pub-big").onclick = () => modal(`<div class="pub-big"><img src="assets/logo.png" alt="" class="pub-big-logo">
+        <h1>Scan for the leaderboard</h1><div class="qr-frame">${qrSvg(publicUrl)}</div><p class="muted small">${esc(publicUrl)}</p>
+        <div class="actions" style="justify-content:center"><button class="btn" id="pb-fs">⛶ Full screen</button><button class="btn primary" data-close>Close</button></div></div>`,
+      (m) => { $("#pb-fs", m).onclick = () => m.requestFullscreen?.(); });
+  };
+  drawPublic();
 
   $("#lb-save").onclick = async () => {
     readCfg();
