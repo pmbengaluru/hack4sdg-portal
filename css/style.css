@@ -284,6 +284,12 @@ tr:last-child td { border-bottom: 0; }
 
 /* ---------- judging */
 .crit { display: grid; grid-template-columns: 1fr 92px; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.crit-edit { border: 1.5px solid var(--line); border-radius: 12px; padding: 10px; margin-bottom: 8px; background: var(--panel-solid); }
+.crit-edit textarea { min-height: 0; margin-top: 8px; font-size: .88rem; }
+.crit-max { display: flex; align-items: center; gap: 6px; margin: 0; font-weight: 600; font-size: .82rem; color: var(--muted); }
+.crit-max input { width: 72px; }
+.crit-desc { margin: 2px 0 6px; font-size: .85rem; color: var(--muted); line-height: 1.45; }
+.has-desc { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
 .team-pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px; }
 .team-pick button { text-align: left; }
 #tot { display: inline-block; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; font-size: 1.6rem; }

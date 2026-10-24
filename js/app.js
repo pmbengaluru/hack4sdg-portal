@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0935";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261024.0935";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.0942";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261024.0942";
 
-const APP_VERSION = "20261024.0935"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261024.0942"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -959,7 +959,12 @@ async function viewPrint(main) {
 // ------------------------------------------------------------------ checkpoints
 function editCheckpoint(c) {
   const isNew = !c.id;
-  const crit = c.criteria?.length ? c.criteria : [{ name: "Innovation", max: 10 }, { name: "Impact on SDGs", max: 10 }, { name: "Technical execution", max: 10 }, { name: "Presentation", max: 10 }];
+  const crit = c.criteria?.length ? c.criteria : [
+    { name: "Innovation", max: 10, desc: "How original is the idea? Is it a new approach rather than a copy of an existing solution?" },
+    { name: "Impact on SDGs", max: 10, desc: "Which Sustainable Development Goal does it address, and how much real difference could it make?" },
+    { name: "Technical execution", max: 10, desc: "Does the prototype work? Quality of the build, use of technology and data." },
+    { name: "Presentation", max: 10, desc: "Clarity of the pitch and demo, and how well the team answers questions." },
+  ];
   modal(`
     <h2>${isNew ? "New checkpoint" : "Edit checkpoint"}</h2>
     <form id="cf">
@@ -970,7 +975,8 @@ function editCheckpoint(c) {
       <div class="field"><label>Description (optional)</label><input name="description" value="${esc(c.description)}"></div>
       <label class="check" id="ask-wrap"><input type="checkbox" name="ask_table" ${c.ask_table ? "checked" : ""}>
         <span><b>Collect table numbers here</b> – when a volunteer scans anyone from a team without a table number, they're asked to enter it (use this for check-in)</span></label>
-      <div class="field" id="crit-wrap"><label>Grading criteria</label><div id="crit"></div>
+      <div class="field" id="crit-wrap"><label>Grading criteria</label>
+        <p class="small muted" style="margin:0 0 8px">Give each criterion a maximum score and, optionally, a description – judges see it while scoring.</p><div id="crit"></div>
         <button type="button" class="btn sm" id="add-crit">+ Criterion</button></div>
       <div class="row" style="margin-bottom:12px">
         <div class="grow"><label>Starts</label><input name="starts_at" type="datetime-local" value="${toLocalInput(c.starts_at)}"></div>
@@ -982,10 +988,13 @@ function editCheckpoint(c) {
         <button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
     </form>`, (m, close) => {
     const critEl = $("#crit", m);
-    const addRow = (x = { name: "", max: 10 }) => {
+    const addRow = (x = { name: "", max: 10, desc: "" }) => {
       const d = document.createElement("div");
-      d.className = "row"; d.style.marginBottom = "6px";
-      d.innerHTML = `<input class="grow" data-cn placeholder="Criterion" value="${esc(x.name)}"><input type="number" data-cm min="1" style="width:80px" value="${x.max}" title="Max score"><button type="button" class="btn sm danger">✕</button>`;
+      d.className = "crit-edit";
+      d.innerHTML = `<div class="row"><input class="grow" data-cn placeholder="Criterion, e.g. Innovation" value="${esc(x.name)}" aria-label="Criterion name">
+          <label class="crit-max">Max <input type="number" data-cm min="1" value="${x.max}" aria-label="Maximum score"></label>
+          <button type="button" class="btn sm danger" title="Remove criterion">✕</button></div>
+        <textarea data-cd rows="2" maxlength="500" placeholder="Description for judges (optional) – what should they look for?" aria-label="Criterion description">${esc(x.desc || "")}</textarea>`;
       $("button", d).onclick = () => d.remove();
       critEl.appendChild(d);
     };
@@ -1003,7 +1012,10 @@ function editCheckpoint(c) {
       const f = new FormData(e.target);
       const type = f.get("type");
       const criteria = type === "judging"
-        ? $$(".row", critEl).map((r) => ({ name: $("[data-cn]", r).value.trim(), max: Number($("[data-cm]", r).value) || 10 })).filter((x) => x.name)
+        ? $$(".crit-edit", critEl).map((r) => {
+            const desc = $("[data-cd]", r).value.trim();
+            return { name: $("[data-cn]", r).value.trim(), max: Number($("[data-cm]", r).value) || 10, ...(desc ? { desc } : {}) };
+          }).filter((x) => x.name)
         : [];
       if (type === "judging" && !criteria.length) return toast("Add at least one grading criterion", "bad");
       const starts_at = fromLocalInput(f.get("starts_at")), ends_at = fromLocalInput(f.get("ends_at"));
@@ -1028,7 +1040,7 @@ async function viewCheckpoints(main) {
     <td><b>${esc(c.name)}</b>${c.description ? `<br><span class="small muted">${esc(c.description)}</span>` : ""}</td>
     <td class="small">${cpWindow(c) ? `${esc(cpWindow(c))}<br>${cpTimeBadge(c)}` : '<span class="muted">—</span>'}</td>
     <td>${c.type === "scan" ? '<span class="badge info">QR scan · volunteers</span>' : '<span class="badge warn">Judging · mentors</span>'}${c.ask_table ? '<br><span class="badge">collects table no.</span>' : ""}</td>
-    <td class="small">${c.type === "judging" ? c.criteria.map((x) => `${esc(x.name)} (${x.max})`).join(", ") : "—"}</td>
+    <td class="small">${c.type === "judging" ? c.criteria.map((x) => `<span ${x.desc ? `title="${esc(x.desc)}" class="has-desc"` : ""}>${esc(x.name)} (${x.max})</span>`).join(", ") : "—"}</td>
     <td><button class="btn sm" data-toggle="${c.id}">${c.active ? "✓ Open" : "Closed"}</button></td>
     <td class="row">${c.type === "judging" ? `<a class="btn sm" href="#/assign/${c.id}">Assign judges</a>` : `<a class="btn sm" href="#/selfcheckin/${c.id}">Attendance QR</a>`}<button class="btn sm" data-edit="${c.id}">Edit</button></td></tr>`;
   main.innerHTML = `
@@ -1856,6 +1868,7 @@ async function judgeTeam(main, cp, teamId, scope) {
       <p class="muted">${esc(cp.name)}${team.college ? " · " + esc(team.college) : ""} · ${team.participants.map((p) => esc(p.name) + (p.is_leader ? " (lead)" : "")).join(", ")}</p></div></div>
     <form class="card" id="sf" style="max-width:640px">
       ${cp.criteria.map((c, i) => `<div class="crit"><div><label>${esc(c.name)} <span class="muted">/ ${c.max}</span></label>
+        ${c.desc ? `<p class="crit-desc">${esc(c.desc)}</p>` : ""}
         <input type="range" min="0" max="${c.max}" step="0.5" value="${vals[c.name] ?? 0}" data-i="${i}"></div>
         <input type="number" min="0" max="${c.max}" step="0.5" value="${vals[c.name] ?? 0}" data-n="${i}"></div>`).join("")}
       <div class="row" style="justify-content:space-between;margin:14px 0"><b>Total</b><span style="font-size:1.4rem;font-weight:700"><span id="tot">0</span> / ${max}</span></div>

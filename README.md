@@ -75,7 +75,7 @@ The camera scanner needs **https**, which GitHub Pages provides.
    - one row per person: `Team Name, Name, Email, Phone, Role`
 
    The preview shows every team with its members before anything is saved. It warns about teams that submitted twice (the latest row is used), the same leader listed under two team names, team-size mismatches and teams with no email. Re-importing updates people and keeps their QR codes.
-2. **Checkpoints.** Create each one as a **QR scan** checkpoint (volunteers) or a **Judging** checkpoint (mentors, with grading criteria and max marks). Open or close them as the day goes on.
+2. **Checkpoints.** Create each one as a **QR scan** checkpoint (volunteers) or a **Judging** checkpoint (mentors, with grading criteria and max marks). Each criterion can have a short description, which judges see under it while scoring. Open or close them as the day goes on.
 3. **Staff.** Add admins, volunteers and mentors one at a time, or paste many as `name, email, role`. Their login details are emailed to them and also shown to you once.
 4. **Send QR emails.** In **Per team** mode (the default), each team leader gets one email with every member's QR, shown inline and attached as separate images to forward. Any member with their own email is cc'd. **Per person** mode emails only people who have their own address. Click **Send to all not yet mailed**. Progress is saved, so you can stop and resume. Failed sends can be retried.
 5. **Scan.** Volunteers open the site on their phone, pick the checkpoint and scan. A green screen means checked in; a yellow screen means already scanned (it shows when and by whom).
