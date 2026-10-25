@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261025.0338";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261025.0338";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261025.0410";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261025.0410";
 
-const APP_VERSION = "20261025.0338"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261025.0410"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -2266,7 +2266,7 @@ async function viewLeaderboard(main) {
       <thead><tr><th>Rank</th><th>Team</th>${used.map((r) => `<th>${esc(r.name)}<br><span class="small muted" style="text-transform:none;letter-spacing:0">/ ${maxOf(r)}${Number(cfg.weights[r.id] ?? 1) !== 1 ? ` · ×${cfg.weights[r.id]}` : ""}</span></th>`).join("")}<th>Final / ${cfg.scale}</th></tr></thead>
       <tbody>${list.map((r) => `<tr class="${r.rank && r.rank <= 3 ? "top" : ""}"><td><b>${r.rank ?? "—"}</b></td>
         <td><b>${esc(r.t.name)}</b>${r.t.table_no ? ` <span class="small muted">· Table ${esc(r.t.table_no)}</span>` : ""}${r.t.college ? `<br><span class="small muted">${esc(r.t.college)}</span>` : ""}</td>
-        ${r.per.map((p) => `<td title="${p.judges ? esc(p.judgeNames.join(", ")) : "Not judged"}">${p.avg == null ? '<span class="muted">—</span>' : `${fmt(p.avg)} <span class="small muted">(${p.judges} judge${p.judges === 1 ? "" : "s"})</span>`}</td>`).join("")}
+        ${r.per.map((p) => `<td title="${p.judges ? esc(p.judgeNames.join(", ")) : "Not judged"}">${p.avg == null ? '<span class="muted">—</span>' : `<b>${fmt(p.avg)}</b><div class="lb-judges">${p.judgeNames.map((n) => `<span>${esc(n)}</span>`).join("")}</div>`}</td>`).join("")}
         <td><b class="lb-final">${fmt(r.score)}</b></td></tr>`).join("") || `<tr><td colspan="${used.length + 3}" class="empty">No matching teams</td></tr>`}</tbody></table></div>`;
   };
   draw();
@@ -2351,9 +2351,9 @@ async function viewLeaderboard(main) {
     try {
       const XLSX = await loadSheetJs();
       const { rows, used } = current;
-      const head = ["Rank", "Team", "Table", "College", ...used.flatMap((r) => [`${r.name} (avg / ${maxOf(r)})`, `${r.name} judges`]), `Final score / ${cfg.scale}`];
+      const head = ["Rank", "Team", "Table", "College", ...used.flatMap((r) => [`${r.name} (avg / ${maxOf(r)})`, `${r.name} – judged by`]), `Final score / ${cfg.scale}`];
       const body = rows.map((r) => [r.rank ?? "", r.t.name, r.t.table_no || "", r.t.college || "",
-        ...r.per.flatMap((p) => [p.avg == null ? "" : Number(p.avg.toFixed(2)), p.judges]), r.score == null ? "" : Number(r.score.toFixed(2))]);
+        ...r.per.flatMap((p) => [p.avg == null ? "" : Number(p.avg.toFixed(2)), p.judgeNames.join(", ")]), r.score == null ? "" : Number(r.score.toFixed(2))]);
       const how = [["Method", cfg.mode === "sum" ? `Sum of round scores scaled to ${cfg.scale}` : `Average of round percentages, scaled to ${cfg.scale}`],
         ["Rounds", used.map((r) => `${r.name} (weight ${cfg.weights[r.id] ?? 1})`).join(", ")],
         ["Missing rounds", cfg.missing === "skip" ? "Left out for that team" : "Counted as 0"],
