@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261024.2252";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261024.2252";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261025.0338";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261025.0338";
 
-const APP_VERSION = "20261024.2252"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261025.0338"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -2265,7 +2265,7 @@ async function viewLeaderboard(main) {
     $("#lb-table").innerHTML = !used.length ? '<div class="empty">Tick at least one round on the left.</div>' : `<div class="table-wrap"><table class="lb-table">
       <thead><tr><th>Rank</th><th>Team</th>${used.map((r) => `<th>${esc(r.name)}<br><span class="small muted" style="text-transform:none;letter-spacing:0">/ ${maxOf(r)}${Number(cfg.weights[r.id] ?? 1) !== 1 ? ` · ×${cfg.weights[r.id]}` : ""}</span></th>`).join("")}<th>Final / ${cfg.scale}</th></tr></thead>
       <tbody>${list.map((r) => `<tr class="${r.rank && r.rank <= 3 ? "top" : ""}"><td><b>${r.rank ?? "—"}</b></td>
-        <td><b>${esc(r.t.name)}</b>${r.t.table_no ? ` <span class="small muted">· Table ${esc(r.t.table_no)}</span>` : ""}</td>
+        <td><b>${esc(r.t.name)}</b>${r.t.table_no ? ` <span class="small muted">· Table ${esc(r.t.table_no)}</span>` : ""}${r.t.college ? `<br><span class="small muted">${esc(r.t.college)}</span>` : ""}</td>
         ${r.per.map((p) => `<td title="${p.judges ? esc(p.judgeNames.join(", ")) : "Not judged"}">${p.avg == null ? '<span class="muted">—</span>' : `${fmt(p.avg)} <span class="small muted">(${p.judges} judge${p.judges === 1 ? "" : "s"})</span>`}</td>`).join("")}
         <td><b class="lb-final">${fmt(r.score)}</b></td></tr>`).join("") || `<tr><td colspan="${used.length + 3}" class="empty">No matching teams</td></tr>`}</tbody></table></div>`;
   };
@@ -2375,7 +2375,7 @@ async function viewResults(main, cpId) {
   const scanCps = cps.filter((c) => c.type === "scan");
   const cp = judging.find((c) => c.id === Number(cpId)) || judging[0];
   const [teams, scores] = await Promise.all([
-    sb.from("teams").select("id,name,table_no").order("name").then(must),
+    sb.from("teams").select("id,name,table_no,college").order("name").then(must),
     cp ? sb.from("scores").select("*").eq("checkpoint_id", cp.id).then(must) : [],
   ]);
   let board = "";
@@ -2389,7 +2389,7 @@ async function viewResults(main, cpId) {
     }).sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1));
     board = `<div class="table-wrap"><table><thead><tr><th>#</th><th>Team</th><th>Avg total / ${max}</th><th>Judged by</th>
       ${cp.criteria.map((c) => `<th>${esc(c.name)}</th>`).join("")}<th></th></tr></thead><tbody>
-      ${rows.map((r, i) => `<tr><td>${r.avg == null ? "" : i + 1}</td><td><b>${esc(r.t.name)}</b>${r.t.table_no ? ` <span class="small muted">· Table ${esc(r.t.table_no)}</span>` : ""}</td>
+      ${rows.map((r, i) => `<tr><td>${r.avg == null ? "" : i + 1}</td><td><b>${esc(r.t.name)}</b>${r.t.table_no ? ` <span class="small muted">· Table ${esc(r.t.table_no)}</span>` : ""}${r.t.college ? `<br><span class="small muted">${esc(r.t.college)}</span>` : ""}</td>
         <td>${r.avg == null ? '<span class="muted">not graded</span>' : `<b>${r.avg.toFixed(2)}</b>`}</td>
         <td>${r.s.length ? `<div class="judged-by">${[...r.s].sort((a, b) => (a.judge_name || "").localeCompare(b.judge_name || ""))
           .map((x) => `<span class="jb" title="${esc(x.judge_name || "Judge")} gave ${x.total}${x.updated_at ? ` · ${fmtTime(x.updated_at)}` : ""}">${esc(x.judge_name || "Judge")} <b>${x.total}</b></span>`).join("")}</div>` : '<span class="muted">—</span>'}</td>
