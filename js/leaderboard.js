@@ -1,5 +1,5 @@
 // Public leaderboard (no login). Shows the ranking an admin published; refreshes every 30 seconds.
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261025.0410";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261025.0422";
 
 const board = document.getElementById("board");
 const sub = document.getElementById("sub");

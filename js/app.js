@@ -1,8 +1,8 @@
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/+esm";
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261025.0410";
-import { analyzeCSV, toCSV } from "./csv.js?v=20261025.0410";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261025.0422";
+import { analyzeCSV, toCSV } from "./csv.js?v=20261025.0422";
 
-const APP_VERSION = "20261025.0410"; // set by scripts/bump-version.mjs
+const APP_VERSION = "20261025.0422"; // set by scripts/bump-version.mjs
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 const app = document.getElementById("app");
 
@@ -2145,7 +2145,38 @@ async function viewAssign(main, cpId) {
 //  avg: weighted average of each round's percentage (score / round max), scaled to `scale`
 //  sum: weighted sum of round scores divided by the weighted sum of round maxima, scaled to `scale`
 // Rounds a team wasn't judged in count as 0, or (missing: "skip") are left out of that team's calculation.
-function computeLeaderboard(teams, rounds, scores, cfg) {
+// Judge-bias normalisation, per round: each judge's scores are put on the round's common scale,
+//   adjusted = round mean + (score - judge mean') * (round sd / judge sd')
+// where judge mean'/sd' are shrunk towards the round's by n / (n + 3), so judges who scored few teams
+// get a smaller correction. A judge's spread is floored at 1/4 of the round's, and results are kept
+// within 0..round max. Returns the scores with `total` replaced by the adjusted value (`raw` keeps the original).
+const NORM_K = 3;
+function normaliseScores(rounds, scores) {
+  const mean = (a) => a.reduce((n, x) => n + x, 0) / a.length;
+  const psd = (a) => { const m = mean(a); return Math.sqrt(mean(a.map((x) => (x - m) ** 2))); };
+  const out = [];
+  for (const r of rounds) {
+    const rs = scores.filter((x) => x.checkpoint_id === r.id);
+    if (!rs.length) continue;
+    const max = r.criteria.reduce((n, c) => n + Number(c.max || 0), 0) || 1;
+    const vals = rs.map((x) => Number(x.total));
+    const rMean = mean(vals), rSd = psd(vals) || 1;
+    const byJudge = new Map();
+    rs.forEach((x) => { const k = x.judge_id || x.judge_name || "?"; byJudge.set(k, [...(byJudge.get(k) || []), x]); });
+    for (const xs of byJudge.values()) {
+      const v = xs.map((x) => Number(x.total)), n = v.length;
+      let jSd = n >= 2 ? psd(v) : rSd;
+      if (jSd < 0.25 * rSd) jSd = 0.25 * rSd;
+      const w = n / (n + NORM_K);
+      const m = w * mean(v) + (1 - w) * rMean, sd = w * jSd + (1 - w) * rSd;
+      xs.forEach((x) => out.push({ ...x, raw: Number(x.total), total: Math.min(max, Math.max(0, rMean + (Number(x.total) - m) * (rSd / sd))) }));
+    }
+  }
+  return out;
+}
+
+function computeLeaderboard(teams, rounds, allScores, cfg) {
+  const scores = cfg.normalise ? normaliseScores(rounds, allScores) : allScores;
   const used = rounds.filter((r) => cfg.rounds.includes(r.id));
   const roundMax = (r) => r.criteria.reduce((n, c) => n + Number(c.max || 0), 0) || 1;
   const w = (r) => Math.max(0, Number(cfg.weights[r.id] ?? 1));
@@ -2153,7 +2184,8 @@ function computeLeaderboard(teams, rounds, scores, cfg) {
     const per = used.map((r) => {
       const s = scores.filter((x) => x.checkpoint_id === r.id && x.team_id === t.id);
       const avg = s.length ? s.reduce((n, x) => n + Number(x.total), 0) / s.length : null;
-      return { round: r, avg, judges: s.length, max: roundMax(r), judgeNames: s.map((x) => x.judge_name || "Judge") };
+      const rawAvg = s.length ? s.reduce((n, x) => n + Number(x.raw ?? x.total), 0) / s.length : null;
+      return { round: r, avg, rawAvg, judges: s.length, max: roundMax(r), judgeNames: s.map((x) => x.judge_name || "Judge") };
     });
     const counted = per.filter((p) => w(p.round) > 0 && (p.avg != null || cfg.missing === "zero"));
     let score = null;
@@ -2181,7 +2213,7 @@ function computeLeaderboard(teams, rounds, scores, cfg) {
   return { rows, used };
 }
 
-const LB_DEFAULT = { rounds: null, weights: {}, mode: "avg", scale: 100, missing: "zero" };
+const LB_DEFAULT = { rounds: null, weights: {}, mode: "avg", scale: 100, missing: "zero", normalise: false };
 
 async function viewLeaderboard(main) {
   await loadSettings();
@@ -2192,7 +2224,7 @@ async function viewLeaderboard(main) {
   }
   const [teams, scoreLists] = await Promise.all([
     sb.from("teams").select("id,name,table_no,college").order("name").then(must),
-    Promise.all(rounds.map((r) => sb.from("scores").select("checkpoint_id,team_id,total,judge_name").eq("checkpoint_id", r.id).then(must))),
+    Promise.all(rounds.map((r) => sb.from("scores").select("checkpoint_id,team_id,total,judge_name,judge_id").eq("checkpoint_id", r.id).then(must))),
   ]);
   const scores = scoreLists.flat();
   let saved = {};
@@ -2223,7 +2255,10 @@ async function viewLeaderboard(main) {
           <span><b>Sum, scaled down</b><br><span class="small muted">Round scores are added up (× weight), then scaled so the best possible total equals the number below. Rounds with more marks count for more.</span></span></label>
         <div class="row" style="margin-top:8px"><label style="margin:0">Final score out of</label>
           <input type="number" name="scale" min="1" step="1" value="${cfg.scale}" style="width:110px"></div>
-        <h2 style="margin-top:18px">3 · Team missed a round?</h2>
+        <h2 style="margin-top:18px">3 · Judge bias</h2>
+        <label class="lb-mode"><input type="checkbox" name="normalise" ${cfg.normalise ? "checked" : ""}>
+          <span><b>Normalise for judge bias</b><br><span class="small muted">Some judges mark generously, others strictly. When on, each judge's scores are put on a common scale within each round (a team is credited for how it did against the other teams that judge saw). Judges who saw only a few teams get a smaller correction.</span></span></label>
+        <h2 style="margin-top:18px">4 · Team missed a round?</h2>
         <label class="check"><input type="radio" name="missing" value="zero" ${cfg.missing !== "skip" ? "checked" : ""}> <span>Count it as <b>0</b> for that round</span></label>
         <label class="check"><input type="radio" name="missing" value="skip" ${cfg.missing === "skip" ? "checked" : ""}> <span><b>Leave it out</b> – use only the rounds the team was judged in</span></label>
         <p class="small muted" style="margin-bottom:0">Within a round, a team's score is always the average of its judges' totals.</p>
@@ -2245,15 +2280,24 @@ async function viewLeaderboard(main) {
     cfg.mode = f.get("mode");
     cfg.scale = Math.max(1, Number(f.get("scale")) || 100);
     cfg.missing = f.get("missing");
+    cfg.normalise = f.get("normalise") === "on";
   };
   let current;
   const draw = () => {
     readCfg();
     current = computeLeaderboard(teams, rounds, scores, cfg);
     const { rows, used } = current;
+    const rawRank = new Map(cfg.normalise ? computeLeaderboard(teams, rounds, scores, { ...cfg, normalise: false }).rows.map((r) => [r.t.id, r]) : []);
+    current.rawRank = rawRank;
+    const change = (r) => {
+      const was = rawRank.get(r.t.id)?.rank;
+      if (!cfg.normalise || r.rank == null || was == null) return "";
+      const d = was - r.rank;
+      return d > 0 ? `<span class="mv up" title="Rank without normalising: ${was}">▲ ${d}</span>` : d < 0 ? `<span class="mv down" title="Rank without normalising: ${was}">▼ ${-d}</span>` : '<span class="mv">–</span>';
+    };
     const ranked = rows.filter((r) => r.score != null);
     $("#lb-title").textContent = used.length
-      ? `${ranked.length} ranked team${ranked.length === 1 ? "" : "s"} · ${cfg.mode === "sum" ? "sum" : "average"} of ${used.map((r) => r.name).join(" + ")}, out of ${cfg.scale}`
+      ? `${ranked.length} ranked team${ranked.length === 1 ? "" : "s"} · ${cfg.mode === "sum" ? "sum" : "average"} of ${used.map((r) => r.name).join(" + ")}, out of ${cfg.scale}${cfg.normalise ? " · normalised for judge bias" : ""}`
       : "Tick at least one round";
     const medals = ["🥇", "🥈", "🥉"];
     $("#lb-podium").innerHTML = ranked.slice(0, 3).map((r, i) => `
@@ -2263,11 +2307,11 @@ async function viewLeaderboard(main) {
     const q = $("#lb-q").value.trim().toLowerCase();
     const list = rows.filter((r) => !q || `${r.t.name} ${r.t.table_no || ""} ${r.t.college || ""}`.toLowerCase().includes(q));
     $("#lb-table").innerHTML = !used.length ? '<div class="empty">Tick at least one round on the left.</div>' : `<div class="table-wrap"><table class="lb-table">
-      <thead><tr><th>Rank</th><th>Team</th>${used.map((r) => `<th>${esc(r.name)}<br><span class="small muted" style="text-transform:none;letter-spacing:0">/ ${maxOf(r)}${Number(cfg.weights[r.id] ?? 1) !== 1 ? ` · ×${cfg.weights[r.id]}` : ""}</span></th>`).join("")}<th>Final / ${cfg.scale}</th></tr></thead>
-      <tbody>${list.map((r) => `<tr class="${r.rank && r.rank <= 3 ? "top" : ""}"><td><b>${r.rank ?? "—"}</b></td>
+      <thead><tr><th>Rank</th>${cfg.normalise ? "<th>Change</th>" : ""}<th>Team</th>${used.map((r) => `<th>${esc(r.name)}<br><span class="small muted" style="text-transform:none;letter-spacing:0">/ ${maxOf(r)}${Number(cfg.weights[r.id] ?? 1) !== 1 ? ` · ×${cfg.weights[r.id]}` : ""}</span></th>`).join("")}<th>Final / ${cfg.scale}</th></tr></thead>
+      <tbody>${list.map((r) => `<tr class="${r.rank && r.rank <= 3 ? "top" : ""}"><td><b>${r.rank ?? "—"}</b></td>${cfg.normalise ? `<td>${change(r)}</td>` : ""}
         <td><b>${esc(r.t.name)}</b>${r.t.table_no ? ` <span class="small muted">· Table ${esc(r.t.table_no)}</span>` : ""}${r.t.college ? `<br><span class="small muted">${esc(r.t.college)}</span>` : ""}</td>
-        ${r.per.map((p) => `<td title="${p.judges ? esc(p.judgeNames.join(", ")) : "Not judged"}">${p.avg == null ? '<span class="muted">—</span>' : `<b>${fmt(p.avg)}</b><div class="lb-judges">${p.judgeNames.map((n) => `<span>${esc(n)}</span>`).join("")}</div>`}</td>`).join("")}
-        <td><b class="lb-final">${fmt(r.score)}</b></td></tr>`).join("") || `<tr><td colspan="${used.length + 3}" class="empty">No matching teams</td></tr>`}</tbody></table></div>`;
+        ${r.per.map((p) => `<td title="${p.judges ? esc(p.judgeNames.join(", ")) : "Not judged"}">${p.avg == null ? '<span class="muted">—</span>' : `<b>${fmt(p.avg)}</b>${cfg.normalise ? ` <span class="small muted" title="Score before normalising">raw ${fmt(p.rawAvg)}</span>` : ""}<div class="lb-judges">${p.judgeNames.map((n) => `<span>${esc(n)}</span>`).join("")}</div>`}</td>`).join("")}
+        <td><b class="lb-final">${fmt(r.score)}</b></td></tr>`).join("") || `<tr><td colspan="${used.length + (cfg.normalise ? 4 : 3)}" class="empty">No matching teams</td></tr>`}</tbody></table></div>`;
   };
   draw();
   form.addEventListener("input", draw);
@@ -2287,7 +2331,7 @@ async function viewLeaderboard(main) {
     const { rows, used } = computeLeaderboard(teams, rounds, scores, cfg);
     snap = {
       updated_at: new Date().toISOString(),
-      title: `${cfg.mode === "sum" ? "Total" : "Average"} of ${used.map((r) => r.name).join(" + ")}`,
+      title: `${cfg.mode === "sum" ? "Total" : "Average"} of ${used.map((r) => r.name).join(" + ")}${cfg.normalise ? " · adjusted for judge bias" : ""}`,
       scale: cfg.scale,
       rows: rows.map((r) => ({ rank: r.rank, team: r.t.name, table: r.t.table_no || null, college: r.t.college || null,
         ...(r.score == null ? {} : { score: Math.round(r.score * 100) / 100 }) })),
@@ -2351,13 +2395,25 @@ async function viewLeaderboard(main) {
     try {
       const XLSX = await loadSheetJs();
       const { rows, used } = current;
-      const head = ["Rank", "Team", "Table", "College", ...used.flatMap((r) => [`${r.name} (avg / ${maxOf(r)})`, `${r.name} – judged by`]), `Final score / ${cfg.scale}`];
-      const body = rows.map((r) => [r.rank ?? "", r.t.name, r.t.table_no || "", r.t.college || "",
-        ...r.per.flatMap((p) => [p.avg == null ? "" : Number(p.avg.toFixed(2)), p.judgeNames.join(", ")]), r.score == null ? "" : Number(r.score.toFixed(2))]);
+      const N = cfg.normalise, raw = current.rawRank, r2 = (n) => (n == null ? "" : Number(n.toFixed(2)));
+      const head = ["Rank", "Team", "Table", "College",
+        ...used.flatMap((r) => N ? [`${r.name} adjusted (/ ${maxOf(r)})`, `${r.name} raw`, `${r.name} – judged by`] : [`${r.name} (avg / ${maxOf(r)})`, `${r.name} – judged by`]),
+        `Final score / ${cfg.scale}`, ...(N ? [`Score without normalising / ${cfg.scale}`, "Rank without normalising", "Rank change"] : [])];
+      const body = rows.map((r) => {
+        const was = raw.get(r.t.id);
+        const d = N && r.rank != null && was?.rank != null ? was.rank - r.rank : null;
+        return [r.rank ?? "", r.t.name, r.t.table_no || "", r.t.college || "",
+          ...r.per.flatMap((p) => N ? [r2(p.avg), r2(p.rawAvg), p.judgeNames.join(", ")] : [r2(p.avg), p.judgeNames.join(", ")]),
+          r2(r.score), ...(N ? [r2(was?.score), was?.rank ?? "", d == null ? "" : d > 0 ? `▲ ${d}` : d < 0 ? `▼ ${-d}` : "–"] : [])];
+      });
       const how = [["Method", cfg.mode === "sum" ? `Sum of round scores scaled to ${cfg.scale}` : `Average of round percentages, scaled to ${cfg.scale}`],
         ["Rounds", used.map((r) => `${r.name} (weight ${cfg.weights[r.id] ?? 1})`).join(", ")],
         ["Missing rounds", cfg.missing === "skip" ? "Left out for that team" : "Counted as 0"],
-        ["Within a round", "Average of the judges' totals"], ["Generated", fmtFull(new Date().toISOString())]];
+        ["Within a round", "Average of the judges' totals"],
+        ["Judge bias", cfg.normalise
+          ? `Normalised: within each round, each judge's scores are put on the round's common scale – adjusted = round average + (score − judge's average) × (round spread ÷ judge's spread). Judges who scored few teams get a weaker correction (teams ÷ (teams + ${NORM_K})); results stay between 0 and the round maximum.`
+          : "Not normalised (raw judge scores)"],
+        ["Generated", fmtFull(new Date().toISOString())]];
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, head, body), "Leaderboard");
       XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, ["Setting", "Value"], how), "How it was calculated");

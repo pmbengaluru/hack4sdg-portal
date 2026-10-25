@@ -1,6 +1,6 @@
 // Public attendance page (no login). Opened from the QR on the display screen:
 // checkin.html?c=<checkpoint id>&k=<rotating code>
-import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261025.0410";
+import { SUPABASE_URL, SUPABASE_KEY } from "../config.js?v=20261025.0422";
 
 const box = document.getElementById("ci");
 const params = new URLSearchParams(location.search);

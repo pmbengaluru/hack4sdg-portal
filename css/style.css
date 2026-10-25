@@ -436,6 +436,9 @@ details.card[open] > summary::before { transform: rotate(90deg); }
 .pod-score small { font-size: .85rem; color: var(--muted); font-weight: 600; margin-left: 3px; }
 .lb-table tr.top td { background: rgba(252, 195, 11, .07); }
 .lb-final { font-size: 1.05rem; color: var(--brand); }
+.mv { font-weight: 700; font-size: .82rem; color: var(--muted); white-space: nowrap; }
+.mv.up { color: var(--ok); }
+.mv.down { color: var(--bad); }
 .lb-judges { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; }
 .lb-judges span { font-size: .72rem; padding: 1px 7px; border-radius: 999px; background: rgba(100, 112, 138, .12); color: var(--muted); white-space: nowrap; }
 @media (max-width: 600px) { .podium { grid-template-columns: 1fr; } .pod-1, .pod-2, .pod-3 { order: 0; } }
